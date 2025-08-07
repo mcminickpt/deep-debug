@@ -149,7 +149,6 @@ static int child_setcontext_fast(void *arg) {
 void restart_child_threads_fast(void) {
   int maxThreadIdx = atomic_load(&threadIdx);
   for (int i = 0; i < maxThreadIdx; i++) {
-                      if (i == 0) break;
     // int clone(int (*fn)(void *), void *stack, int flags, void *arg, ...
     //           /* pid_t *parent_tid, void *tls, pid_t *child_tid */ );
     int clone_flags = (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM

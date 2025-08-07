@@ -209,7 +209,7 @@ void mc_template_thread_loop_forever(void) {
     libpthread_sem_wait((sem_t *)&tpt->libmcmini_sem);
     log_debug("`mcmini` signaled a fork!");
 
-    const pid_t cpid = multithreaded_fork();
+    const pid_t cpid = fast_multithreaded_fork();
 
     if (cpid == -1) {
       // `multithreaded_fork()` failed

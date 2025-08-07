@@ -142,20 +142,20 @@ static void setTLSPointer(struct threadinfo *localThreadInfo) {
   asm volatile ("msr     tpidr_el0, %[gs]" : :[gs] "r" (addr));
 }
 #elif defined(__riscv)
-void getTLSPointer(struct threadinfo *localThreadInfo)
+static void getTLSPointer(struct threadinfo *localThreadInfo)
 {
   unsigned long int addr;
   asm volatile ("addi %0, tp, 0" : "=r" (addr));
   localThreadInfo->tlsAddr = addr - 1856;  // sizeof(struct pthread)=1856
 }
-void setTLSPointer(struct threadinfo *localThreadInfo)
+static void setTLSPointer(struct threadinfo *localThreadInfo)
 {
   unsigned long int addr = localThreadInfo->tlsAddr + 1856;
   asm volatile("addi tp, %[gs], 0" : : [gs] "r" (addr));
 }
 #else
-void getTLSPointer(struct threadinfo *localThreadInfo) {}
-void setTLSPointer(struct threadinfo *localThreadInfo) {}
+static void getTLSPointer(struct threadinfo *localThreadInfo) {}
+static void setTLSPointer(struct threadinfo *localThreadInfo) {}
 #endif
 
 // SEE DMTCP:src/tls.cpp:TLSInfo_GetTidOffset()
