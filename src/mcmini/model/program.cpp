@@ -127,25 +127,41 @@ state::runner_id_t program::discover_runner(const runner_state *initial_state,
 }
 
 bool program::is_in_deadlock() const {
-  // If any transition is enabled, we are not in deadlock
-  //
-  // Furthermore, if there are NO enabled transitions, we need to check if this
-  // is because all runners have exited, i.e. whether they even have more
-  // transitions to execute. If they do, then then it would be a deadlock in
-  // the traditional sense since there are threads which haven't completed but
-  // are blocked. If they've all exited, we shouldn't say this is a deadlock:
-  // the program trivially can't do anything else.
-  for (const auto &pair : this->get_pending_transitions()) {
-    if (pair.second->is_enabled_in(this->state_seq) ||
-        this->state_seq.get_state_of_runner(pair.first)->has_exited())
-      return false;
+  // If there aren't any threads, this program isn't in deadlock.
+  if (this->get_pending_transitions().empty()) {
+    return false;
   }
-  return true;
+
+  // If any transition is enabled, we are not in deadlock
+  for (const auto &pair : this->get_pending_transitions()) {
+    if (pair.second->is_enabled_in(this->state_seq)) return false;
+  }
+
+  // Furthermore, if there are NO enabled transitions, we need to check if this
+  // is because ALL threads have exited, i.e. whether they even have more
+  // transitions to execute. If some threads have exited while others are
+  // still blocked, then the program would be have deadlock in the traditional
+  // sense since there are threads which haven't completed but are blocked.
+  //
+  // However, if all threads have exited, we shouldn't say this is a deadlock:
+  // the program trivially can't do anything else.
+  //
+  // NOTE: An exception could be made if the main thread exits: normally, the
+  // main thread exiting means the process has exited as well. However, we
+  // probably still want to show a bug if other userspace threads manage to get
+  // into a deadlock even while the main thread could exit, so we don't treat
+  // that case specially.
+  bool all_exited = true;
+  for (const auto &pair : this->get_pending_transitions()) {
+    if (!this->state_seq.get_state_of_runner(pair.first)->has_exited())
+      all_exited = false;
+  }
+  return !all_exited;
 }
 
 std::ostream &program::dump_state(std::ostream &os) const {
-  os << this->get_state_sequence().back().debug_string();
   std::stringstream ss;
+  ss << this->get_state_sequence().back().debug_string();
   ss << "\nTHREAD TRACE\n";
   for (const auto &t : get_trace()) {
     ss << "thread " << t->get_executor() << ": " << t->to_string() << "\n";
