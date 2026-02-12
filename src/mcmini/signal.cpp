@@ -57,17 +57,17 @@ void signal_tracker_sig_handler(int sig, siginfo_t *, void *) {
 
 bool signal_tracker::is_bad_signal(int signo) {
   switch (signo) {
-  case SIGILL:
-  case SIGABRT:
-  case SIGBUS:
-  case SIGFPE:
-  case SIGKILL:
-  case SIGSEGV:
-  case SIGPIPE:
-  case SIGSYS:
-    return true;
-  default:
-    return false;
+    case SIGILL:
+    case SIGABRT:
+    case SIGBUS:
+    case SIGFPE:
+    case SIGKILL:
+    case SIGSEGV:
+    case SIGPIPE:
+    case SIGSYS:
+      return true;
+    default:
+      return false;
   }
 }
 

@@ -1,4 +1,5 @@
 #include "mcmini/model_checking/reporter.hpp"
+
 #include "mcmini/signal.hpp"
 
 using namespace model;
@@ -17,8 +18,7 @@ void reporter::dump_relinearized_trace(std::ostream &os,
 
 void reporter::trace_completed(const algorithm::context &c,
                                const stats &stats) const {
-  if (!verbose)
-    return;
+  if (!verbose) return;
   std::cout << "TRACE " << stats.trace_id << "\n";
   for (const auto &t : c.get_model().get_trace()) {
     std::cout << "thread " << t->get_executor() << ": " << t->to_string()

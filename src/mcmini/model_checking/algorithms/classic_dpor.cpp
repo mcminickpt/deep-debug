@@ -1,3 +1,5 @@
+#include <sys/types.h>
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -8,14 +10,14 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <sys/types.h>
 #include <unordered_set>
 #include <vector>
 
 #ifdef MCMINI_USE_SCIP
+#include <numeric>
+
 #include "scip/scip.h"
 #include "scip/scipdefplugins.h"
-#include <numeric>
 #endif
 
 #include "mcmini/coordinator/coordinator.hpp"
@@ -43,13 +45,13 @@ using namespace model_checking;
 logger dpor_logger("dpor");
 
 struct classic_dpor::dpor_context : public algorithm::context {
-public:
+ public:
   ::coordinator &coordinator;
   std::vector<model_checking::stack_item> stack;
 
   dpor_context(::coordinator &c) : coordinator(c) {}
 
-public:
+ public:
   const size_t state_stack_size() const { return stack.size(); }
   const size_t transition_stack_size() const {
     const size_t ss = state_stack_size();
@@ -180,44 +182,45 @@ void classic_dpor::verify_using(coordinator &coordinator,
       try {
         runner_id_t rid;
         switch (config.policy) {
-        case algorithm::exploration_policy::smallest_first: {
-          rid = dpor_stack.back().get_first_enabled_runner();
-          break;
-        }
-        case algorithm::exploration_policy::round_robin: {
-          auto unscheduled_runners = dpor_stack.back().get_enabled_runners();
+          case algorithm::exploration_policy::smallest_first: {
+            rid = dpor_stack.back().get_first_enabled_runner();
+            break;
+          }
+          case algorithm::exploration_policy::round_robin: {
+            auto unscheduled_runners = dpor_stack.back().get_enabled_runners();
 
-          // For round robin scheduling, always prefer to schedule
-          // threads that don't appear in `round_robin_sched` because
-          // these threads are necessarily unscheduled wrt the previous starting
-          // point.
-          //
-          // 1. Among those threads not appearing in the round robin
-          // schedule, always pick the smallest.
-          // 2. If every enabled thread has already been scheduled, then pick
-          // the first based on the round robin schedule and move it to the back
-          // of the list. NOTE: Every enabled runner is in `round_robin_sched`,
-          // but the converse is not necessarily true (i.e. there may be threads
-          // in `round_robin_sched` that aren't enabled)
-          for (const runner_id_t id : round_robin_sched) {
-            unscheduled_runners.erase(id);
+            // For round robin scheduling, always prefer to schedule
+            // threads that don't appear in `round_robin_sched` because
+            // these threads are necessarily unscheduled wrt the previous
+            // starting point.
+            //
+            // 1. Among those threads not appearing in the round robin
+            // schedule, always pick the smallest.
+            // 2. If every enabled thread has already been scheduled, then pick
+            // the first based on the round robin schedule and move it to the
+            // back of the list. NOTE: Every enabled runner is in
+            // `round_robin_sched`, but the converse is not necessarily true
+            // (i.e. there may be threads in `round_robin_sched` that aren't
+            // enabled)
+            for (const runner_id_t id : round_robin_sched) {
+              unscheduled_runners.erase(id);
+            }
+            if (!unscheduled_runners.empty()) {
+              rid = *std::min_element(unscheduled_runners.begin(),
+                                      unscheduled_runners.end());
+              round_robin_sched.push_back(rid);
+            } else {
+              auto it = std::find_if(round_robin_sched.begin(),
+                                     round_robin_sched.end(),
+                                     [&](const runner_id_t id) {
+                                       return dpor_stack.back().is_enabled(id);
+                                     });
+              assert(it != round_robin_sched.end());
+              round_robin_sched.splice(round_robin_sched.end(),
+                                       round_robin_sched, it);
+              rid = *it;
+            }
           }
-          if (!unscheduled_runners.empty()) {
-            rid = *std::min_element(unscheduled_runners.begin(),
-                                    unscheduled_runners.end());
-            round_robin_sched.push_back(rid);
-          } else {
-            auto it =
-                std::find_if(round_robin_sched.begin(), round_robin_sched.end(),
-                             [&](const runner_id_t id) {
-                               return dpor_stack.back().is_enabled(id);
-                             });
-            assert(it != round_robin_sched.end());
-            round_robin_sched.splice(round_robin_sched.end(), round_robin_sched,
-                                     it);
-            rid = *it;
-          }
-        }
         }
 
         this->continue_dpor_by_expanding_trace_with(rid, context);
@@ -429,8 +432,7 @@ void classic_dpor::dynamically_update_backtrack_sets(dpor_context &context) {
       coordinator.get_current_program_model().get_num_runners();
 
   std::set<runner_id_t> thread_ids;
-  for (runner_id_t i = 0; i < num_threads; i++)
-    thread_ids.insert(i);
+  for (runner_id_t i = 0; i < num_threads; i++) thread_ids.insert(i);
 
   const ssize_t t_stack_top = (ssize_t)(context.stack.size()) - 2;
   const runner_id_t last_runner_to_execute =
@@ -478,8 +480,7 @@ void classic_dpor::dynamically_update_backtrack_sets(dpor_context &context) {
        * will be the maxmimum `i` since we're searching
        * backwards
        */
-      if (should_stop)
-        break;
+      if (should_stop) break;
     }
   }
 }
@@ -501,8 +502,7 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
       const bool in_e = q == p || context.threads_race_after(i, q, p);
 
       // If E != empty set
-      if (in_e && !pre_si.sleep_set_contains(q))
-        e.insert(q);
+      if (in_e && !pre_si.sleep_set_contains(q)) e.insert(q);
     }
 
     if (e.empty()) {
@@ -517,8 +517,7 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
         // in the set E, chose that thread to backtrack
         // on. This is equivalent to not having to do
         // anything
-        if (pre_si.backtrack_set_contains(q))
-          return true;
+        if (pre_si.backtrack_set_contains(q)) return true;
       }
 
       // Otherwise select an arbitrary thread to backtrack upon.
@@ -595,8 +594,7 @@ classic_dpor::dpor_context::transitive_reduction() const {
   // transitive reduction of this digraph then represents those transitions in
   // an "immediate" race: ti --> tj and for all transitions tk in-between,
   // either ti --/--> tk or tk --/-->tj.
-  if (this->stack.empty())
-    return {};
+  if (this->stack.empty()) return {};
   const size_t N = this->transition_stack_size();
   const size_t INF = N + 1;
 
@@ -639,7 +637,7 @@ classic_dpor::dpor_context::transitive_reduction() const {
   // Iterating in increasing topological order (see note above)
   for (size_t v = 0; v < N; ++v) {
     if (unmarked[v]) {
-      C.emplace_back(); // Start a new chain
+      C.emplace_back();  // Start a new chain
       size_t current_chain_id = C.size() - 1;
       size_t current_node = v;
 
@@ -698,8 +696,7 @@ classic_dpor::dpor_context::transitive_reduction() const {
     assert(out_edges.size() == redundant_edges.size());
     size_t j = 0;
     for (size_t i = 0; i < out_edges.size(); ++i)
-      if (!redundant_edges[i])
-        out_edges[j++] = out_edges[i];
+      if (!redundant_edges[i]) out_edges[j++] = out_edges[i];
     out_edges.resize(j);
   }
 
@@ -712,7 +709,6 @@ classic_dpor::dpor_context::transitive_reduction() const {
         assert(happens_before(i, j));
       } else {
         if (happens_before(i, j)) {
-
           auto s = std::find_if(adj_list[i].begin(), adj_list[i].end(),
                                 [&](int w) { return happens_before(w, j); });
           assert(s != adj_list[i].end());
@@ -729,8 +725,8 @@ void SCIP_dump(SCIP *scip) {
 }
 #endif
 
-std::vector<const transition *>
-classic_dpor::dpor_context::linearize_optimal() const {
+std::vector<const transition *> classic_dpor::dpor_context::linearize_optimal()
+    const {
 #ifdef MCMINI_USE_SCIP
   // Given a fixed trace `T` of `N` transitions and a happens-before relation
   // `happens-before_T: [1, N] x [1, N] -> {0, 1}` over the indices of `T`, the
@@ -863,15 +859,14 @@ classic_dpor::dpor_context::linearize_optimal() const {
     std::vector<size_t> parent;
     std::vector<size_t> sizes;
 
-  public:
+   public:
     dsu(size_t n) : sizes(n, 1) {
       parent.resize(n);
       std::iota(parent.begin(), parent.end(), 0);
     }
 
     size_t find(size_t i) {
-      if (parent[i] == i)
-        return i;
+      if (parent[i] == i) return i;
       return parent[i] = find(parent[i]);
     }
 
@@ -879,8 +874,7 @@ classic_dpor::dpor_context::linearize_optimal() const {
       size_t root_i = find(i);
       size_t root_j = find(j);
       if (root_i != root_j) {
-        if (sizes[root_i] < sizes[root_j])
-          std::swap(root_i, root_j);
+        if (sizes[root_i] < sizes[root_j]) std::swap(root_i, root_j);
         parent[root_i] = root_j;
         sizes[root_i] += sizes[root_j];
       }
@@ -923,28 +917,24 @@ classic_dpor::dpor_context::linearize_optimal() const {
       for (size_t u = 0; u < N; ++u) {
         out_degree[u] = H[u].size();
         tids[u] = tid(u);
-        for (size_t v : H[u])
-          in_degree[v]++;
+        for (size_t v : H[u]) in_degree[v]++;
       }
 
       for (size_t u = 0; u < N; ++u) {
         if (out_degree[u] == 1) {
-          size_t v = H[u][0]; // The only neighbor
-          if (in_degree[v] == 1 && tids[u] == tids[v])
-            dsu.unite(u, v);
+          size_t v = H[u][0];  // The only neighbor
+          if (in_degree[v] == 1 && tids[u] == tids[v]) dsu.unite(u, v);
         }
       }
     }
     {
       std::map<size_t, std::vector<size_t>> groups;
-      for (size_t i = 0; i < N; ++i)
-        groups[dsu.find(i)].push_back(i);
+      for (size_t i = 0; i < N; ++i) groups[dsu.find(i)].push_back(i);
 
       supernodes.reserve(groups.size());
       for (auto &p : groups) {
         const size_t new_supernode_id = supernodes.size();
-        for (size_t i : p.second)
-          H_to_supernode[i] = new_supernode_id;
+        for (size_t i : p.second) H_to_supernode[i] = new_supernode_id;
         supernodes.push_back(std::move(p.second));
       }
     }
@@ -995,10 +985,10 @@ classic_dpor::dpor_context::linearize_optimal() const {
       assert(i < j);
       assert(x[i][j] == nullptr);
       std::string name = "x_" + std::to_string(i) + std::to_string(j);
-      SCIPcreateVarBasic(scip, &x[i][j], name.c_str(), 0.0, 1.0,
-                         tid(supernodes[i].back()) !=
-                             tid(supernodes[j].front()),
-                         SCIP_VARTYPE_BINARY);
+      SCIPcreateVarBasic(
+          scip, &x[i][j], name.c_str(), 0.0, 1.0,
+          tid(supernodes[i].back()) != tid(supernodes[j].front()),
+          SCIP_VARTYPE_BINARY);
       SCIPaddVar(scip, x[i][j]);
     }
   }
@@ -1055,10 +1045,8 @@ classic_dpor::dpor_context::linearize_optimal() const {
     SCIPcreateConsBasicLinear(scip, &leave_cons, leave.c_str(), 0, nullptr,
                               nullptr, 1.0, 1.0);
     for (size_t j = 0; j < M + 1; ++j) {
-      if (x[i][j])
-        SCIPaddCoefLinear(scip, leave_cons, x[i][j], 1.0);
-      if (x[j][i])
-        SCIPaddCoefLinear(scip, enter_cons, x[j][i], 1.0);
+      if (x[i][j]) SCIPaddCoefLinear(scip, leave_cons, x[i][j], 1.0);
+      if (x[j][i]) SCIPaddCoefLinear(scip, enter_cons, x[j][i], 1.0);
     }
     SCIPaddCons(scip, enter_cons);
     SCIPaddCons(scip, leave_cons);
@@ -1070,8 +1058,7 @@ classic_dpor::dpor_context::linearize_optimal() const {
   // -INF <= u_i - u_j + M*x_ij <= (M - 1) for i, j in [1, M], i != j
   for (size_t i = 0; i < M; ++i) {
     for (size_t j = 0; j < M; ++j) {
-      if (!x[i][j])
-        continue;
+      if (!x[i][j]) continue;
       SCIP_CONS *cons = nullptr;
       const std::string name =
           "subtour_" + std::to_string(i) + "_" + std::to_string(j);
@@ -1129,11 +1116,9 @@ classic_dpor::dpor_context::linearize_optimal() const {
   }
   {
     for (size_t i = 0; i < M + 1; ++i) {
-      if (i < M)
-        SCIPreleaseVar(scip, &u[i]);
+      if (i < M) SCIPreleaseVar(scip, &u[i]);
       for (size_t j = 0; j < M + 1; ++j) {
-        if (x[i][j])
-          SCIPreleaseVar(scip, &x[i][j]);
+        if (x[i][j]) SCIPreleaseVar(scip, &x[i][j]);
       }
     }
     SCIPfree(&scip);
@@ -1158,12 +1143,10 @@ classic_dpor::dpor_context::linearize_lowest_first() const {
   std::vector<size_t> ready_set;
   std::vector<int> in_degree(N, 0);
   for (size_t u = 0; u < N; ++u)
-    for (size_t v : adj_list[u])
-      in_degree[v]++;
+    for (size_t v : adj_list[u]) in_degree[v]++;
 
   for (size_t i = 0; i < N; ++i)
-    if (in_degree[i] == 0)
-      ready_set.push_back(i);
+    if (in_degree[i] == 0) ready_set.push_back(i);
 
   runner_id_t last_rid = RUNNER_ID_MAX;
   while (!ready_set.empty()) {
@@ -1175,7 +1158,7 @@ classic_dpor::dpor_context::linearize_lowest_first() const {
         if (r == last_rid) {
           next_vertex = ready_set[i];
           selected_index = i;
-          break; // Found the best greedy match that avoids inversion
+          break;  // Found the best greedy match that avoids inversion
         }
       }
     }

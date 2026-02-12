@@ -107,8 +107,8 @@ void program::model_execution_of(runner_id_t p, const transition *npo) {
   trace.push(next_steps.replace_unowned(npo));
 }
 
-state::objid_t
-program::discover_object(const visible_object_state *initial_state) {
+state::objid_t program::discover_object(
+    const visible_object_state *initial_state) {
   return this->state_seq.add_object(initial_state);
 }
 
@@ -134,8 +134,7 @@ bool program::is_in_deadlock() const {
 
   // If any transition is enabled, we are not in deadlock
   for (const auto &pair : this->get_pending_transitions()) {
-    if (pair.second->is_enabled_in(this->state_seq))
-      return false;
+    if (pair.second->is_enabled_in(this->state_seq)) return false;
   }
 
   // Furthermore, if there are NO enabled transitions, we need to check if this
@@ -154,7 +153,7 @@ bool program::is_in_deadlock() const {
   // that case specially.
   for (const auto &pair : this->get_pending_transitions())
     if (!this->state_seq.get_state_of_runner(pair.first)->has_exited())
-      return true; // All blocked and at least one hasn't exited
+      return true;  // All blocked and at least one hasn't exited
   return false;
 }
 

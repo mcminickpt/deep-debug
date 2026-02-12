@@ -31,8 +31,7 @@ coordinator::coordinator(
       runtime_transition_mapping(std::move(runtime_transition_mapping)),
       process_source(std::move(process_source)),
       assumes_linear_program_flow(assumes_linear_program_flow) {
-  if (!assumes_linear_program_flow)
-    this->assign_new_process_handle();
+  if (!assumes_linear_program_flow) this->assign_new_process_handle();
 }
 
 void coordinator::execute_runner(process::runner_id_t runner_id) {

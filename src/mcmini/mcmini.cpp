@@ -54,60 +54,60 @@ visible_object_state *translate_recorded_object_to_model(
   // TODO: A function table would be slightly better, but this works perfectly
   // fine too.
   switch (recorded_object.type) {
-  case MUTEX: {
-    auto mutex_state =
-        static_cast<objects::mutex::state>(recorded_object.mut_state);
-    pthread_mutex_t *mutex_location =
-        (pthread_mutex_t *)recorded_object.location;
-    return new objects::mutex(mutex_state, mutex_location);
-  }
-  case CONDITION_VARIABLE: {
-    // Create the condition variable model object with full state information
-    auto cv_state = static_cast<objects::condition_variable::state>(
-        recorded_object.cond_state.status);
+    case MUTEX: {
+      auto mutex_state =
+          static_cast<objects::mutex::state>(recorded_object.mut_state);
+      pthread_mutex_t *mutex_location =
+          (pthread_mutex_t *)recorded_object.location;
+      return new objects::mutex(mutex_state, mutex_location);
+    }
+    case CONDITION_VARIABLE: {
+      // Create the condition variable model object with full state information
+      auto cv_state = static_cast<objects::condition_variable::state>(
+          recorded_object.cond_state.status);
 
-    runner_id_t interacting_thread =
-        recorded_object.cond_state.interacting_thread;
-    pthread_mutex_t *associated_mutex =
-        recorded_object.cond_state.associated_mutex;
-    int count = recorded_object.cond_state.count;
-    // get waiting threads from the map
-    auto it = cv_waiting_threads.find(recorded_object.location);
-    std::vector<std::pair<runner_id_t, condition_variable_status>>
-        waiters_with_state =
-            (it != cv_waiting_threads.end())
-                ? it->second
-                : std::vector<
-                      std::pair<runner_id_t, condition_variable_status>>();
-    return new objects::condition_variable(cv_state, interacting_thread,
-                                           associated_mutex, count,
-                                           waiters_with_state);
-  }
-  case SEMAPHORE: {
-    return new objects::semaphore(static_cast<objects::semaphore::state>(
-                                      recorded_object.sem_state.status),
-                                  recorded_object.sem_state.count);
-  }
-  // Other objects here
-  // case ...  { }
-  // ...
-  default: {
-    std::cerr << "The new object type" << recorded_object.type
-              << "hasn't been implemented yet\n";
-    std::abort();
-  }
+      runner_id_t interacting_thread =
+          recorded_object.cond_state.interacting_thread;
+      pthread_mutex_t *associated_mutex =
+          recorded_object.cond_state.associated_mutex;
+      int count = recorded_object.cond_state.count;
+      // get waiting threads from the map
+      auto it = cv_waiting_threads.find(recorded_object.location);
+      std::vector<std::pair<runner_id_t, condition_variable_status>>
+          waiters_with_state =
+              (it != cv_waiting_threads.end())
+                  ? it->second
+                  : std::vector<
+                        std::pair<runner_id_t, condition_variable_status>>();
+      return new objects::condition_variable(cv_state, interacting_thread,
+                                             associated_mutex, count,
+                                             waiters_with_state);
+    }
+    case SEMAPHORE: {
+      return new objects::semaphore(static_cast<objects::semaphore::state>(
+                                        recorded_object.sem_state.status),
+                                    recorded_object.sem_state.count);
+    }
+    // Other objects here
+    // case ...  { }
+    // ...
+    default: {
+      std::cerr << "The new object type" << recorded_object.type
+                << "hasn't been implemented yet\n";
+      std::abort();
+    }
   }
 }
 
-runner_state *
-translate_recorded_runner_to_model(const ::visible_object &recorded_object) {
+runner_state *translate_recorded_runner_to_model(
+    const ::visible_object &recorded_object) {
   switch (recorded_object.type) {
-  case THREAD: {
-    return new objects::thread(recorded_object.thrd_state.status);
-  }
-  default: {
-    std::abort();
-  }
+    case THREAD: {
+      return new objects::thread(recorded_object.thrd_state.status);
+    }
+    default: {
+      std::abort();
+    }
   }
 }
 
@@ -171,17 +171,17 @@ void do_model_checking_from_dmtcp_ckpt_file(const config &config) {
     }
 
     std::sort(recorded_threads.begin(), recorded_threads.end(),
-              [](const ::visible_object& lhs, const ::visible_object& rhs) {
+              [](const ::visible_object &lhs, const ::visible_object &rhs) {
                 return lhs.thrd_state.id < rhs.thrd_state.id;
               });
 
-    for (const ::visible_object& recorded_thread : recorded_threads) {
+    for (const ::visible_object &recorded_thread : recorded_threads) {
       recorder.observe_runner(
-          (void*)recorded_thread.thrd_state.pthread_desc,
+          (void *)recorded_thread.thrd_state.pthread_desc,
           translate_recorded_runner_to_model(recorded_thread));
     }
 
-    for (const ::visible_object& recorded_thread : recorded_threads) {
+    for (const ::visible_object &recorded_thread : recorded_threads) {
       // Translates from what each user space thread recorded as its next
       // transition. This happens _after_ DMTCP has restarted the checkpoint
       // image but _before_ the template thread told the McMini process (i.e.
@@ -190,11 +190,11 @@ void do_model_checking_from_dmtcp_ckpt_file(const config &config) {
       // of "during the RECORD phase of `libmcmini.so`") the next transition
       // it would have run had McMini not just now intervened.
       runner_id_t recorded_id = recorded_thread.thrd_state.id;
-      const transition* next_transition = nullptr;
+      const transition *next_transition = nullptr;
 
       switch (recorded_thread.thrd_state.status) {
         case ALIVE: {
-          volatile runner_mailbox* mb = &rw_region->mailboxes[recorded_id];
+          volatile runner_mailbox *mb = &rw_region->mailboxes[recorded_id];
           transition_registry::transition_discovery_callback callback =
               tr.get_callback_for(mb->type);
           if (!callback) {
@@ -260,7 +260,7 @@ void do_recording(const config &config) {
   dmtcp_launch_args.push_back(libmcmini_path);
   dmtcp_launch_args.push_back("--modify-env");
   dmtcp_launch_args.push_back(config.target_executable);
-  for (const std::string& target_arg : config.target_executable_args)
+  for (const std::string &target_arg : config.target_executable_args)
     dmtcp_launch_args.push_back(target_arg);
   real_world::target target_program("dmtcp_launch", dmtcp_launch_args);
   std::cout << "Recording: " << target_program << std::endl;
@@ -270,13 +270,13 @@ void do_recording(const config &config) {
 std::string find_first_ckpt_file_in_cwd() {
   try {
     // Open the current directory
-    DIR* dir = opendir(".");
+    DIR *dir = opendir(".");
     if (dir == nullptr) {
       perror("opendir");
       return "";
     }
 
-    struct dirent* entry;
+    struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
       // Check if the entry is a regular file and has the .foo extension
       if (entry->d_type == DT_REG) {  // DT_REG indicates a regular file
@@ -294,19 +294,19 @@ std::string find_first_ckpt_file_in_cwd() {
         << std::endl;
     closedir(dir);
     return "";
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return "";
   }
 }
 
-int main_cpp(int argc, const char** argv) {
+int main_cpp(int argc, const char **argv) {
   model::config mcmini_config;
 
-  if (const char* env_p = std::getenv("MCMINI_LOG_LEVEL"))
+  if (const char *env_p = std::getenv("MCMINI_LOG_LEVEL"))
     mcmini_config.global_severity_level = logging::parse_severity(env_p);
 
-  const char** cur_arg = &argv[1];
+  const char **cur_arg = &argv[1];
   if (argc == 1) {
     cur_arg[0] = "--help";
     cur_arg[1] = NULL;
@@ -389,7 +389,7 @@ int main_cpp(int argc, const char** argv) {
     } else if (strcmp(cur_arg[0], "--print-at-traceId") == 0 ||
                strcmp(cur_arg[0], "-p") == 0) {
       mcmini_config.target_trace_id = strtoul(cur_arg[1], nullptr, 10);
-      char* endptr;
+      char *endptr;
       if (strtol(cur_arg[1], &endptr, 10) == 0 || endptr[0] != '\0') {
         fprintf(stderr, "%s: illegal value\n", "--print-at-traceId");
         exit(1);
