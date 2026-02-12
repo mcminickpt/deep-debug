@@ -152,7 +152,7 @@ void do_model_checking_from_dmtcp_ckpt_file(const config &config) {
     ::visible_object current_obj;
     std::vector<::visible_object> recorded_threads;
     std::unordered_map<
-        void*, std::vector<std::pair<runner_id_t, condition_variable_status>>>
+        void *, std::vector<std::pair<runner_id_t, condition_variable_status>>>
         cv_waiting_threads;
     while (fifo.read(&current_obj) && current_obj.type != UNKNOWN) {
       if (current_obj.type == THREAD) {

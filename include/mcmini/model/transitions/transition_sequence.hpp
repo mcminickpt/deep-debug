@@ -20,10 +20,11 @@ namespace model {
  * the enabled-ness of transitions in the sequence.
  */
 class transition_sequence final {
- private:
-  std::vector<const transition*> contents;
+private:
+  std::vector<const transition *> contents;
+  std::unordered_map<runner_id_t, size_t> per_runner_depth;
 
- public:
+public:
   using index = size_t;
   transition_sequence() = default;
   ~transition_sequence();
@@ -35,11 +36,21 @@ class transition_sequence final {
 
   bool empty() const { return contents.empty(); }
   size_t count() const { return contents.size(); }
-  const transition* at(size_t i) const { return contents.at(i); }
-  const transition* back() const { return contents.back(); }
+  size_t count(runner_id_t tid) const {
+    if (per_runner_depth.find(tid) != per_runner_depth.end()) {
+      return per_runner_depth.at(tid);
+    } else {
+      return 0;
+    }
+  }
+  const transition *at(size_t i) const { return contents.at(i); }
+  const transition *back() const { return contents.back(); }
   std::unique_ptr<const transition> extract_at(size_t i);
-  void push(const transition* t) { contents.push_back(t); }
+  void push(const transition *t) {
+    contents.push_back(t);
+    per_runner_depth[t->get_executor()]++;
+  }
   void consume_into_subsequence(uint32_t depth);
 };
 
-}  // namespace model
+} // namespace model

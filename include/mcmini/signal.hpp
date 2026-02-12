@@ -1,12 +1,13 @@
 #pragma once
 
-#include <semaphore.h>
-
 #include <atomic>
 #include <csignal>
 #include <exception>
 #include <iostream>
+#include <semaphore.h>
 #include <unordered_map>
+
+#include "mcmini/log/logger.hpp"
 
 extern "C" {
 #include "mcmini/lib/sig.h"
@@ -14,9 +15,10 @@ extern "C" {
 
 using signo_t = int;
 extern const std::unordered_map<signo_t, const char *> sig_to_str;
+extern logging::logger signal_logger;
 
 struct signal_tracker {
- private:
+private:
   static signal_tracker _instance;
   constexpr signal_tracker() = default;
   constexpr static size_t MAX_SIGNAL_TYPES = NSIG - 1;
@@ -25,7 +27,7 @@ struct signal_tracker {
 #endif
   std::atomic_uint32_t flags[MAX_SIGNAL_TYPES] = {};
 
- public:
+public:
   static sem_t *current_sem;
   struct interrupted_error;
   static signal_tracker &instance();

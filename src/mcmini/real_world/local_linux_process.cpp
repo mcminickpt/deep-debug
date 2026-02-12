@@ -85,6 +85,7 @@ volatile runner_mailbox *local_linux_process::execute_runner(runner_id_t id) {
   // OK for now, but should be handled in the future.
   errno = 0;
   signal_tracker::sig_semwait((sem_t *)&rmb->model_side_sem);
+  signal_tracker::set_sem(nullptr);
   if (signal_tracker::instance().try_consume_signal(SIGCHLD)) {
     // TODO: Get the true failure status from the template process via
     // e.g. shared memory.

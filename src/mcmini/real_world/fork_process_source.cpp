@@ -110,7 +110,7 @@ std::unique_ptr<process> fork_process_source::make_new_process() {
         ") was not synchronized with correctly: " +
         std::string(strerror(errno)));
   }
-
+  signal_tracker::set_sem(nullptr);
   if (signal_tracker::instance().try_consume_signal(SIGCHLD)) {
     // TODO: At this point, McMini may have multiple child processes.
     // Calling `prctl(PR_SETSUBREAPER)` in the branch processes means
@@ -168,4 +168,5 @@ void multithreaded_fork_process_source::make_new_template_process() {
         ") was not synchronized with correctly: " +
         std::string(strerror(errno)));
   }
+  signal_tracker::set_sem(nullptr);
 }
