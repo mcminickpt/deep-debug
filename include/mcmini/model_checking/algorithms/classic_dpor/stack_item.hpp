@@ -1,10 +1,12 @@
 #pragma once
+#include <array>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "mcmini/defines.h"
 #include "mcmini/model_checking/algorithms/classic_dpor/clock_vector.hpp"
+#include "mcmini/model_checking/algorithms/classic_dpor/runner_item.hpp"
 
 namespace model_checking {
 
