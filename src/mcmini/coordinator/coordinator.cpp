@@ -102,6 +102,12 @@ void coordinator::return_to_depth(uint32_t n) {
       << "\n\n**************** AFTER RESTORATION *********************";
 }
 
+pid_t model_to_system_map::get_target_pid() const {
+  return _coordinator.current_process_handle
+             ? _coordinator.current_process_handle->get_pid()
+             : -1;
+}
+
 model::state::runner_id_t model_to_system_map::get_model_of_runner(
     remote_address<void> handle) const {
   model::state::objid_t objid = get_model_of_object(handle);
