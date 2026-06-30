@@ -102,6 +102,11 @@ class mutable_state : public state {
    */
   std::unique_ptr<mutable_state> clone() const { return this->mutable_clone(); }
 
+  // Bring the base-class (virtual and template) overloads into scope so the
+  // templates declared below do not hide them (`-Werror=overloaded-virtual`).
+  using state::get_state_of_object;
+  using state::get_state_of_runner;
+
   template <typename concrete_visible_object_state>
   const concrete_visible_object_state *get_state_of_object(objid_t id) const {
     return (static_cast<const state *>(this))

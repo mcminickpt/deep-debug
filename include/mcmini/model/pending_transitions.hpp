@@ -43,6 +43,7 @@ struct pending_transitions final {
   }
   auto cend() -> decltype(_contents.cend()) const { return _contents.cend(); }
   size_t size() const { return this->_contents.size(); }
+  bool empty() const { return this->_contents.empty(); }
   /**
    * @brief Returns the transition mapped to id `id`, or `nullptr` if no such
    * runner has been mapped to an id.
