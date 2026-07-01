@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cerrno>
 #include <csignal>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -160,12 +161,50 @@ void multithreaded_fork_process_source::make_new_template_process() {
 
   fork_process_source::make_new_template_process();
   log_verbose(mfps) << "Waiting for the template thread to stabilize";
-  int rc = signal_tracker::sig_semwait((sem_t*)&tstruct->mcmini_process_sem);
-  if (rc != 0) {
-    throw process_source::process_creation_exception(
-        "The template process (" +
-        std::to_string(this->template_process_handle->get_pid()) +
-        ") was not synchronized with correctly: " +
-        std::string(strerror(errno)));
+
+  // Wait for the restarted template to signal readiness -- but do NOT block
+  // forever if it dies first. A failed or incompatible checkpoint (or any crash
+  // during `dmtcp_restart`) can kill the template before it ever posts, and
+  // SIGCHLD is not guaranteed to reach us (e.g. `dmtcp_restart` may reparent the
+  // restored process, so the plain `sig_semwait` above would hang indefinitely
+  // with no diagnostic). Instead, poll the readiness semaphore with a timeout
+  // and, whenever it isn't yet posted, actively check that the template process
+  // is still alive; if it died, fail fast with a clear error.
+  const pid_t template_pid = this->template_process_handle->get_pid();
+  sem_t* ready_sem = (sem_t*)&tstruct->mcmini_process_sem;
+  while (true) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;  // re-check liveness at most ~1s after a death
+    const bool acquired = sem_timedwait(ready_sem, &deadline) == 0;
+    if (!acquired && errno == EINTR) continue;
+    if (!acquired && errno != ETIMEDOUT) {
+      throw process_source::process_creation_exception(
+          "Error while waiting for the template process (" +
+          std::to_string(template_pid) +
+          ") to stabilize: " + std::string(strerror(errno)));
+    }
+
+    // Either the semaphore was posted or we timed out. In both cases confirm
+    // the template is still alive before trusting a post: the readiness
+    // semaphore is ALSO posted by the SIGCHLD handler on child death, so a
+    // successful acquire does not by itself imply the template stabilized.
+    // `WNOWAIT` peeks without reaping, leaving the child for its normal handle
+    // destructor.
+    siginfo_t info;
+    info.si_pid = 0;  // lets us distinguish "no state change" under WNOHANG
+    const bool template_died =
+        waitid(P_PID, template_pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 &&
+        info.si_pid == template_pid;
+    if (template_died) {
+      this->template_process_handle = nullptr;
+      throw process_source::process_creation_exception(
+          "The template process (" + std::to_string(template_pid) +
+          ") died during `dmtcp_restart` before signaling readiness. This "
+          "usually means the checkpoint failed to restore (e.g. a corrupt or "
+          "incompatible checkpoint image).");
+    }
+    if (acquired) return;  // template is alive and signaled readiness
+    // Timed out but still alive: keep waiting.
   }
 }
