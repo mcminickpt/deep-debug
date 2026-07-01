@@ -187,6 +187,11 @@ bool is_dmtcp_object(void *addr);
 /// @note you must acquire `rec_list_lock` before calling this function
 rec_list *add_rec_entry(const visible_object *, rec_list **, rec_list **);
 rec_list *add_rec_entry_record_mode(const visible_object *);
+// Like add_rec_entry_record_mode, but allocates the node with mc_ts_alloc
+// instead of malloc, so it is safe to call from a thread that libtsan has not
+// yet registered (the mc_thread_routine_wrapper prologue under DMTCP). See
+// TSAN-McMini-DMTCP.txt.
+rec_list *add_rec_entry_record_mode_ts(const visible_object *);
 void print_rec_list(const rec_list *);
 rec_list *add_dmctp_object(const visible_object *);
 
