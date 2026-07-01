@@ -67,8 +67,32 @@ void mc_load_intercepted_pthread_functions(void) {
     libc_abort();
   }
 
-  libpthread_pthread_create_ptr = dlsym(libpthread_handle, "pthread_create");
   libpthread_pthread_join_ptr = dlsym(libpthread_handle, "pthread_join");
+
+  // In classic model checking (no DMTCP), resolve `pthread_create` via
+  // RTLD_NEXT rather than the explicit `libpthread` handle. Because
+  // `libmcmini.so` is LD_PRELOAD'd ahead of the target's DT_NEEDED libraries,
+  // RTLD_NEXT lands on the *next* `pthread_create` in the link map -- a
+  // sanitizer's interceptor (e.g. libtsan's) when the target is instrumented,
+  // and libc/libpthread otherwise. Going through the interceptor lets a
+  // sanitizer initialize its per-thread state for threads that libmcmini spawns
+  // in TARGET_BRANCH mode (see wrappers.c:mc_pthread_create); calling libc's
+  // `pthread_create` directly (the explicit handle) left that state
+  // uninitialized and crashed on the first instrumented access in the child.
+  //
+  // Under DMTCP we keep the explicit `libpthread` handle unchanged: libdmtcp is
+  // also in the link map, so RTLD_NEXT could resolve to DMTCP's interceptor,
+  // and the DMTCP thread-creation paths are handled separately via
+  // `libdmtcp_pthread_create`. (Sanitizer support under deep debugging is
+  // future work.)
+  if (dmtcp_is_enabled()) {
+    libpthread_pthread_create_ptr = dlsym(libpthread_handle, "pthread_create");
+  } else {
+    libpthread_pthread_create_ptr = dlsym(RTLD_NEXT, "pthread_create");
+    if (!libpthread_pthread_create_ptr)
+      libpthread_pthread_create_ptr =
+          dlsym(libpthread_handle, "pthread_create");
+  }
   pthread_mutex_init_ptr = dlsym(libpthread_handle, "pthread_mutex_init");
   pthread_mutex_lock_ptr = dlsym(libpthread_handle, "pthread_mutex_lock");
   pthread_mutex_trylock_ptr = dlsym(libpthread_handle, "pthread_mutex_trylock");
