@@ -16,6 +16,7 @@
 #define DMTCP_H
 
 #include <netinet/ip.h>
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -43,8 +44,8 @@
 # define EXTERNC
 #endif // ifdef __cplusplus
 
-/* Define to the version of this package. */
-#define DMTCP_PLUGIN_API_VERSION "3"
+/* Bump when DmtcpPluginDescriptor_t changes ABI. */
+#define DMTCP_PLUGIN_API_VERSION "4"
 
 #ifdef __cplusplus
 namespace dmtcp {
@@ -238,11 +239,77 @@ void dmtcp_initialize_plugin(void) __attribute((weak));
 typedef struct DmtcpUniqueProcessId {
   uint64_t _hostid;  // gethostid()
   uint64_t _time; // time()
-  pid_t _pid; // getpid()
+
+  union {
+    pid_t _pid; // getpid()
+    int32_t _;
+  };
+
   uint32_t _computation_generation; // computationGeneration()
 } DmtcpUniqueProcessId;
 
 int dmtcp_unique_pids_equal(DmtcpUniqueProcessId a, DmtcpUniqueProcessId b);
+
+typedef struct DmtcpInfo {
+  int argc;
+  const char **argv;
+} DmtcpInfo;
+
+enum ElfType {
+  Elf_32,
+  Elf_64
+};
+
+typedef struct {
+  uint64_t startAddr;
+  uint64_t endAddr;
+} MemRegion;
+
+typedef void (*PostRestartFnPtr_t)(double, int);
+#define DMTCP_CKPT_SIGNATURE "DMTCP_CHECKPOINT_IMAGE_v4.0\n"
+typedef struct {
+  char ckptSignature[32];
+
+  DmtcpUniqueProcessId upid;
+  DmtcpUniqueProcessId uppid;
+  DmtcpUniqueProcessId compGroup;
+
+  pid_t pid;
+  pid_t ppid;
+  pid_t sid;
+  pid_t gid;
+  pid_t fgid;
+  uint32_t isRootOfProcessTree;
+
+  uint32_t numPeers;
+  uint32_t elfType;
+
+  uint64_t clock_gettime_offset;
+  uint64_t getcpu_offset;
+  uint64_t gettimeofday_offset;
+  uint64_t time_offset;
+
+  // Reserve 3 * 30MB for restore buffer.
+#define RESTORE_BUF_TOTAL_SIZE (90 * 1024 * 1024)
+  MemRegion restoreBuf;
+
+  MemRegion vdso;
+  MemRegion vvar;
+  MemRegion vvarVClock;
+
+  uint64_t savedBrk;
+  uint64_t endOfStack;
+
+  uint64_t postRestartAddr;
+  //void (*post_restart)(double, int);
+
+  char procname[1024];
+  char procSelfExe[1024];
+
+  char padding[1792];
+} DmtcpCkptHeader;
+
+static_assert(sizeof(DmtcpCkptHeader) == 4096, "DmtcpCkptHeader must be 4096 bytes");
 
 // FIXME:
 // If a plugin is not compiled with defined(__PIC__) and we can verify
@@ -329,8 +396,6 @@ const char *dmtcp_get_ckpt_files_subdir(void);
 int dmtcp_should_ckpt_open_files(void);
 int dmtcp_allow_overwrite_with_ckpted_files(void);
 int dmtcp_skip_truncate_file_at_restart(const char* path);
-void dmtcp_set_restore_buf_addr(void *new_addr, uint64_t len);
-uint64_t dmtcp_restore_buf_len();
 
 int dmtcp_get_ckpt_signal(void);
 const char *dmtcp_get_uniquepid_str(void) __attribute__((weak));
@@ -428,13 +493,16 @@ int dmtcp_protected_environ_fd(void);
  *  discovers a pid without going through a system call (e.g., through
  *  the proc filesystem), use this to virtualize the pid.
  */
-pid_t dmtcp_real_to_virtual_pid(pid_t realPid) __attribute((weak));
-pid_t dmtcp_virtual_to_real_pid(pid_t virtualPid) __attribute((weak));
+pid_t dmtcp_pid_real_to_virtual(pid_t realPid) __attribute((weak));
+pid_t dmtcp_pid_virtual_to_real(pid_t virtualPid) __attribute((weak));
 
+// McMini helpers: translate pids only when running under DMTCP.
+// (DMTCP plugin API v4 renamed dmtcp_{real_to_virtual,virtual_to_real}_pid to
+// dmtcp_pid_{real_to_virtual,virtual_to_real}.)
 #define mcmini_virtual_pid(PID) \
-  (dmtcp_is_enabled() ? dmtcp_real_to_virtual_pid((PID)) : (PID))
+  (dmtcp_is_enabled() ? dmtcp_pid_real_to_virtual((PID)) : (PID))
 #define mcmini_real_pid(PID) \
-  (dmtcp_is_enabled() ? dmtcp_virtual_to_real_pid((PID)) : (PID))
+  (dmtcp_is_enabled() ? dmtcp_pid_virtual_to_real((PID)) : (PID))
 
 // bq_file -> "batch queue file"; used only by batch-queue plugin
 int dmtcp_is_bq_file(const char *path) __attribute((weak));
@@ -445,7 +513,7 @@ int dmtcp_bq_restore_file(const char *path,
                           int type) __attribute((weak));
 
 /*  These next two functions are defined in contrib/ckptfile/ckptfile.cpp
- *  But they are currently used only in src/plugin/ipc/file/fileconnection.cpp
+ *  But they are currently used only in src/plugin/file/fileconnection.cpp
  *    and in a trivial fashion.  These are intended for future extensions.
  */
 int dmtcp_must_ckpt_file(const char *path) __attribute((weak));
