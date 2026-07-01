@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <functional>
 
 #include "mcmini/coordinator/coordinator.hpp"
@@ -51,6 +53,16 @@ class model_to_system_map final {
   bool contains_runner(real_world::remote_address<void> addr) const {
     return get_model_of_runner(addr) != model::invalid_rid;
   }
+
+  /**
+   * @brief The PID of the live target process the coordinator is currently
+   * managing, or -1 if no process is currently alive.
+   *
+   * Used by transition callbacks that need to inspect the target's memory
+   * directly (e.g. reading a primitive to check whether it was statically
+   * initialized).
+   */
+  pid_t get_target_pid() const;
 
   using runner_generation_function =
       std::function<const model::transition *(model::state::runner_id_t)>;
