@@ -734,7 +734,10 @@ int mc_pthread_join(pthread_t t, void **rv) {
 
       struct timespec time = {.tv_sec = 2, .tv_nsec = 0};
       while (1) {
-        int rc = pthread_timedjoin_np(t, rv, &time);
+        // Use the libtsan-bypassing handle: a direct pthread_timedjoin_np would
+        // hit libtsan's interceptor and trip its thread-registry CHECK under
+        // DMTCP. See TSAN-McMini-DMTCP.txt.
+        int rc = libpthread_timedjoin_np(t, rv, &time);
         if (rc == 0) {  // Join succeeded
           libpthread_mutex_lock(&rec_list_lock);
           thread_record->vo.thrd_state.status = EXITED;

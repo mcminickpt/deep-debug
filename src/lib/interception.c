@@ -16,6 +16,7 @@ typeof(&pthread_create) libpthread_pthread_create_ptr;
 typeof(&pthread_create) libdmtcp_pthread_create_ptr;
 typeof(&pthread_join) libpthread_pthread_join_ptr;
 typeof(&pthread_join) libdmtcp_pthread_join_ptr;
+typeof(&pthread_timedjoin_np) libpthread_timedjoin_np_ptr;
 typeof(&pthread_mutex_init) pthread_mutex_init_ptr;
 typeof(&pthread_mutex_lock) pthread_mutex_lock_ptr;
 typeof(&pthread_mutex_trylock) pthread_mutex_trylock_ptr;
@@ -69,6 +70,7 @@ void mc_load_intercepted_pthread_functions(void) {
 
   libpthread_pthread_create_ptr = dlsym(libpthread_handle, "pthread_create");
   libpthread_pthread_join_ptr = dlsym(libpthread_handle, "pthread_join");
+  libpthread_timedjoin_np_ptr = dlsym(libpthread_handle, "pthread_timedjoin_np");
   pthread_mutex_init_ptr = dlsym(libpthread_handle, "pthread_mutex_init");
   pthread_mutex_lock_ptr = dlsym(libpthread_handle, "pthread_mutex_lock");
   pthread_mutex_trylock_ptr = dlsym(libpthread_handle, "pthread_mutex_trylock");
@@ -227,6 +229,11 @@ int pthread_join(pthread_t thread, void **rv) {
 int libpthread_pthread_join(pthread_t thread, void **rv) {
   libmcmini_init();
   return (*libpthread_pthread_join_ptr)(thread, rv);
+}
+int libpthread_timedjoin_np(pthread_t thread, void **rv,
+                            const struct timespec *abstime) {
+  libmcmini_init();
+  return (*libpthread_timedjoin_np_ptr)(thread, rv, abstime);
 }
 int libdmtcp_pthread_join(pthread_t thread, void **rv) {
   libmcmini_init();
