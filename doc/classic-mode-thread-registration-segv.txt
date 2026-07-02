@@ -1,0 +1,108 @@
+Classic-mode SEGV: new application threads never registered with TSan
+=============================================================================
+
+Symptom
+--------
+Running any TSan-instrumented target (producer-consumer-tsan,
+cv-producer-consumer-tsan) under classic (non-DMTCP) model checking --
+`mcmini ./target`, no `-i`/`--from-checkpoint` involved at all -- crashed
+100% of the time, deterministically, the moment the target's first
+non-main thread reached its first `libpthread_*`-wrapped call:
+
+  ThreadSanitizer:DEADLYSIGNAL
+  ==PID==ERROR: ThreadSanitizer: SEGV on unknown address 0x000000000000
+  ==PID==The signal is caused by a READ memory access.
+  ==PID==Hint: address points to the zero page.
+  ThreadSanitizer: nested bug in the same thread, aborting.
+
+TSan's own crash handler could not even produce a symbolicated backtrace
+(a second fault while handling the first -- itself a symptom of the same
+root cause: the crashing thread has no valid per-thread TSan state, and
+neither does TSan's own signal-handling code when it tries to use that
+same state to report the crash).
+
+Root cause
+-----------
+Caught live via `gdb --args ./mcmini ./producer-consumer-tsan` with
+`set follow-fork-mode child`, `set detach-on-fork off`, and
+`set schedule-multiple on` (needed, so the parent `mcmini` process keeps
+running -- classic mode requires it to actively coordinate with the
+branch process, so freezing it while continuing only the child deadlocks
+instead of crashing). `handle SIGSEGV stop nopass` lets gdb catch the
+fault before TSan's own handler consumes it. Full backtrace of the
+crashing thread:
+
+  #0  __tsan::SlotLock (thr=0x...) at tsan_rtl.cpp:366
+  #1  __tsan::SlotLocker::SlotLocker (...) at tsan_rtl.h:641
+  #2  __tsan::Acquire (thr=..., pc=..., addr=...) at tsan_rtl_mutex.cpp:448
+  #3  guard_acquire (thr=..., g=<libmcini_init>, ...) at tsan_interceptors_posix.cpp:891
+  #4  ___interceptor_pthread_once (o=<libmcini_init>, f=mc_load_intercepted_pthread_functions)
+  #5  libmcmini_init () from ./libmcmini.so
+  #6  libpthread_mutex_lock () from ./libmcmini.so
+  #7  mc_register_this_thread () from ./libmcmini.so
+  #8  mc_thread_routine_wrapper () from ./libmcmini.so
+  #9  start_thread
+  #10 clone3
+
+The chain: `mc_thread_routine_wrapper()` (the new thread's actual OS-level
+entry point) calls `mc_register_this_thread()` as its first statement,
+which calls `libpthread_mutex_lock()`, which calls `libmcmini_init()`,
+which lazily resolves all the `libpthread_*` bypass handles exactly once
+via `pthread_once()`. `pthread_once` is a public, dynamically-resolved
+symbol that TSan intercepts -- and TSan's interceptor needs this thread's
+own `ThreadState` to do its own bookkeeping. But this thread was never
+registered with TSan in the first place: `mc_pthread_create()`'s
+TARGET_BRANCH/TARGET_BRANCH_AFTER_RESTART case (src/lib/wrappers.c)
+created it via `libpthread_pthread_create()` -- a handle resolved via
+`dlopen("libpthread")` + `dlsym()`, which always finds real, raw glibc,
+bypassing *any* interceptor (TSan's or libmcmini's own) unconditionally,
+regardless of load order. TSan's own `pthread_create` interceptor -- the
+thing that would normally set up this thread's `ThreadState` -- never ran
+for this thread at all.
+
+The comment above the original call ("Calling libpthread_pthread_create
+simplifies all this") suggests this was chosen for convenience, not as a
+deliberate TSan-avoidance measure -- unlike the `__clone`-based recreation
+work for DMTCP-restarted threads (doc files elsewhere in this directory),
+which deliberately bypasses TSan's interceptor for well-documented,
+load-order-specific reasons. This one had no such reason and was simply a
+bug: classic mode has no DMTCP/checkpoint-restart concerns at all, so
+there was never a reason to avoid TSan's own registration for these
+threads.
+
+The fix
+--------
+Added `tsan_or_real_pthread_create()` (src/lib/interception.c), resolved
+via `dlsym(RTLD_NEXT, "pthread_create")` instead of the libpthread-handle
+dlsym used by `libpthread_pthread_create_ptr`. `RTLD_NEXT` finds whatever
+comes *after* libmcmini.so in this process's actual, specific load order:
+
+  - Classic mode: libmcmini loads ahead of libtsan (see
+    TSAN-McMini-DMTCP.txt's own explanation of this load order), so
+    "next after libmcmini" correctly lands on TSan's own pthread_create
+    interceptor -- the fix.
+  - DMTCP mode: libtsan loads ahead of libmcmini, so "next after
+    libmcmini" still resolves past both and lands on real glibc, exactly
+    like libpthread_pthread_create's behavior today -- no change, no
+    regression risk for the already-extensively-verified DMTCP+TSan
+    restart flow (which handles TSan registration for its own
+    clone()-recreated threads via an entirely separate mechanism: R3/R4's
+    __clone + fresh-fiber approach, not pthread_create at all).
+
+`mc_pthread_create()`'s TARGET_BRANCH/TARGET_BRANCH_AFTER_RESTART case
+(src/lib/wrappers.c) now calls `tsan_or_real_pthread_create()` instead of
+`libpthread_pthread_create()`.
+
+Verification
+-------------
+- producer-consumer-tsan and cv-producer-consumer-tsan, classic mode: 100%
+  reproducible SEGV before the fix, zero crashes across multiple runs
+  after (cv-producer-consumer-tsan takes longer to fully explore -- more
+  interleavings from the mutex+cond-based synchronization -- but completes
+  cleanly given enough time).
+- Classic-mode regression check: cv-test, deadly-embrace,
+  producer-consumer, and cv-producer-consumer (non-TSan) all give
+  unchanged results.
+- DMTCP+TSan --multithreaded-fork restart flow (producer-consumer-tsan):
+  batch-verified unaffected, consistent with the RTLD_NEXT resolution
+  falling through to real glibc in that load order exactly as before.
