@@ -14,6 +14,7 @@ pthread_once_t libmcini_init = PTHREAD_ONCE_INIT;
 
 typeof(&pthread_create) libpthread_pthread_create_ptr;
 typeof(&pthread_create) libdmtcp_pthread_create_ptr;
+typeof(&pthread_create) tsan_or_real_pthread_create_ptr;
 typeof(&pthread_join) libpthread_pthread_join_ptr;
 typeof(&pthread_join) libdmtcp_pthread_join_ptr;
 typeof(&pthread_timedjoin_np) libpthread_timedjoin_np_ptr;
@@ -69,6 +70,9 @@ void mc_load_intercepted_pthread_functions(void) {
   }
 
   libpthread_pthread_create_ptr = dlsym(libpthread_handle, "pthread_create");
+  // See tsan_or_real_pthread_create()'s header comment for why this must be
+  // RTLD_NEXT, not the libpthread_handle dlsym above.
+  tsan_or_real_pthread_create_ptr = dlsym(RTLD_NEXT, "pthread_create");
   libpthread_pthread_join_ptr = dlsym(libpthread_handle, "pthread_join");
   libpthread_timedjoin_np_ptr = dlsym(libpthread_handle, "pthread_timedjoin_np");
   pthread_mutex_init_ptr = dlsym(libpthread_handle, "pthread_mutex_init");
@@ -221,6 +225,12 @@ int libdmtcp_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                             void *(*routine)(void *), void *arg) {
   libmcmini_init();
   return (*libdmtcp_pthread_create_ptr)(thread, attr, routine, arg);
+}
+
+int tsan_or_real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                                void *(*routine)(void *), void *arg) {
+  libmcmini_init();
+  return (*tsan_or_real_pthread_create_ptr)(thread, attr, routine, arg);
 }
 
 int pthread_join(pthread_t thread, void **rv) {

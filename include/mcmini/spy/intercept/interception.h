@@ -25,6 +25,16 @@ int libpthread_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                   void *(*routine)(void *), void *arg);
 int libdmtcp_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                             void *(*routine)(void *), void *arg);
+// Resolved via dlsym(RTLD_NEXT, "pthread_create"), NOT libpthread_pthread_create's
+// dlopen("libpthread")+dlsym handle: RTLD_NEXT finds whatever comes after
+// libmcmini.so in this process's specific load order, which is TSan's own
+// pthread_create interceptor in classic (non-DMTCP) mode -- where libmcmini
+// loads ahead of libtsan -- letting a genuinely new thread register with TSan
+// the normal way. Under DMTCP, where libtsan loads ahead of libmcmini, this
+// still resolves past it to real glibc, identical to libpthread_pthread_create
+// -- see mc_pthread_create()'s TARGET_BRANCH/TARGET_BRANCH_AFTER_RESTART case.
+int tsan_or_real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                                void *(*routine)(void *), void *arg);
 
 int pthread_join(pthread_t thread, void**);
 int libpthread_pthread_join(pthread_t thread, void**);
