@@ -535,7 +535,15 @@ __attribute__((constructor)) void libmcmini_event_late_init() {
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   libpthread_sem_init(&template_thread_sem, 0, 0);
-  libdmtcp_pthread_create(&template_thread_id, &attr, &template_thread, NULL);
+  // Create via the PUBLIC pthread_create (not libdmtcp_pthread_create) so that,
+  // when the target is instrumented, libtsan's pthread_create interceptor sees
+  // and registers this thread -- otherwise its (absent) TSAN ThreadState makes
+  // restart crash inside libtsan's setjmp/longjmp restore. mc_pthread_create
+  // recognizes the flag and still routes the actual creation through DMTCP
+  // without user-thread machinery. See TSAN-McMini-DMTCP.txt.
+  mc_creating_internal_thread = 1;
+  pthread_create(&template_thread_id, &attr, &template_thread, NULL);
+  mc_creating_internal_thread = 0;
   pthread_attr_destroy(&attr);
 }
 

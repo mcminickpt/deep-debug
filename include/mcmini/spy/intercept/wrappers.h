@@ -2,8 +2,14 @@
 
 #include <pthread.h>
 
+#include "mcmini/defines.h"
 #include "mcmini/lib/entry.h"
 #include "mcmini/real_world/mailbox/runner_mailbox.h"
+
+// See definition in wrappers.c: set while libmcmini creates one of its own
+// helper threads, so mc_pthread_create creates it plainly (TSAN-visible,
+// DMTCP-known) instead of as a model-checked user thread.
+extern MCMINI_THREAD_LOCAL int mc_creating_internal_thread;
 
 void thread_await_scheduler(void);
 void thread_wake_scheduler_and_wait(void);

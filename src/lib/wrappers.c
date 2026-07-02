@@ -56,6 +56,15 @@ runner_id_t search_pthread_map(pthread_t t) {
 
 MCMINI_THREAD_LOCAL runner_id_t tid_self = RID_INVALID;
 
+// Set (on the creating thread) while libmcmini creates one of its OWN helper
+// threads (e.g. the template thread) via the public pthread_create. It tells
+// mc_pthread_create to create the thread plainly -- routed through DMTCP and
+// visible to any sanitizer's pthread_create interceptor -- rather than treating
+// it as a user thread to be model-checked. Keeping it visible to
+// ThreadSanitizer is what lets its ThreadState round-trip checkpoint/restart.
+// See TSAN-McMini-DMTCP.txt.
+MCMINI_THREAD_LOCAL int mc_creating_internal_thread = 0;
+
 runner_id_t mc_register_this_thread(void) {
   static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
   static runner_id_t tid_next = 0;
@@ -598,6 +607,17 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   // immediately after sending the `DMTCP_EVENT_INIT` to `libmcmini.so`
   // and creates no other threads during execution
   static pthread_once_t main_thread_once = PTHREAD_ONCE_INIT;
+
+  // libmcmini's own helper thread (e.g. the template thread). It reached us
+  // through the sanitizer's pthread_create interceptor (if any) -- so TSAN has
+  // already registered it and wrapped `routine` -- and we now just hand it to
+  // DMTCP so it is DMTCP-known, with no user-thread machinery. Creating it via
+  // the public pthread_create (rather than libdmtcp_pthread_create directly)
+  // is deliberate: it keeps the thread visible to libtsan, so its ThreadState
+  // survives checkpoint/restart. See TSAN-McMini-DMTCP.txt.
+  if (mc_creating_internal_thread) {
+    return libdmtcp_pthread_create(thread, attr, routine, arg);
+  }
 
   // TODO: Reduce code duplication here!
   switch (get_current_mode()) {
