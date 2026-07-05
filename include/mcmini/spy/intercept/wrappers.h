@@ -46,3 +46,4 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond);
 void mc_exit_main_thread_in_child(void);
 MCMINI_NO_RETURN void mc_transparent_abort(void);
 MCMINI_NO_RETURN void mc_transparent_exit(int status);
+MCMINI_NO_RETURN void mc_pthread_exit(void *retval);

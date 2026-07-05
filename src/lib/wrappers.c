@@ -465,6 +465,31 @@ MCMINI_NO_RETURN void mc_transparent_abort(void) {
   }
 }
 
+MCMINI_NO_RETURN void mc_pthread_exit(void *retval) {
+  switch (get_current_mode()) {
+    case PRE_DMTCP_INIT:
+    case PRE_CHECKPOINT_THREAD:
+    case CHECKPOINT_THREAD:
+    case RECORD:
+    case PRE_CHECKPOINT: {
+      libpthread_pthread_exit(retval);
+    }
+    case DMTCP_RESTART_INTO_BRANCH:
+    case DMTCP_RESTART_INTO_TEMPLATE:
+    case TARGET_BRANCH:
+    case TARGET_BRANCH_AFTER_RESTART: {
+      if (tid_self == RID_MAIN_THREAD) {
+        mc_exit_main_thread_in_child();
+      } else {
+        mc_exit_thread_in_child();
+      }
+    }
+    default: {
+      libc_abort();
+    }
+  }
+}
+
 struct mc_thread_routine_arg {
   void *arg;
   thread_routine routine;
