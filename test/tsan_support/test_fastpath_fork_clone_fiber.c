@@ -7,9 +7,31 @@
 // public clone()), and R4 (fresh TSan fiber for the forking thread AND each
 // recreated thread) under real ThreadSanitizer.
 //
+// What this harness's RED/GREEN evidence actually proves: R3. The buggy
+// build reliably reproduces a real "ThreadSanitizer: CHECK failed" in
+// ForkChildAfter (public clone() intercepted by libtsan and mishandled for
+// a CLONE_THREAD clone), and the fixed build (using __clone) passes
+// cleanly -- this is genuine falsification/confirmation evidence.
+//
+// The forking-thread fiber switch (the R4 remainder, as opposed to the
+// recreated-thread fiber switch, which was already proven separately) is
+// included here for structural completeness and does execute in both
+// build configurations' code paths, but it is NOT independently validated
+// by this harness: the forking thread is just main(), which only does a
+// handful of sem_wait/sem_post/fprintf calls after the fork before
+// _exit(), never enough post-fork instrumented work to trigger the
+// shadow-call-stack overflow that fix guards against (per the vendor
+// package's README, that failure "manifests as this thread keeps
+// running"). Removing that fiber switch from dmtcp-callback.c would not
+// turn this harness red. Its correctness rests on direct analogy to the
+// already-proven multithreaded-fork-tsan-2.0 recipe, not on evidence from
+// this harness.
+//
 // BUGGY MODE (for RED evidence): compile with -DMTF_BUGGY to use the public
 // clone() (no R3) and skip the forking-thread fiber switch (no R4 remainder),
-// reproducing the failure these two fixes exist to prevent.
+// reproducing the failure these two fixes exist to prevent. Only the R3
+// half of this toggle is known to actually be exercised by the resulting
+// pass/fail outcome; see above.
 #define _GNU_SOURCE
 #include <assert.h>
 #include <pthread.h>
