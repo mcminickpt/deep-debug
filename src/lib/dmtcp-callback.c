@@ -20,8 +20,45 @@
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/spy/checkpointing/tsan_support.h"
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
+
+// ThreadSanitizer Fiber API (weak: resolves to the TSAN runtime only for TSAN
+// targets, NULL no-op otherwise). A "fiber" is a TSAN ThreadState decoupled
+// from the OS thread. `multithreaded_fork` recreates the pre-checkpoint threads
+// with clone() + setcontext (so their original %fs/TLS and pthread descriptor
+// are preserved and libmcmini does not intercept the creation). But clone()
+// means libtsan never registered these threads, so their cur_thread() is torn
+// on resume and the first TSAN-intercepted call (e.g. munmap) faults. Mirroring
+// DMTCP's own restore fix (threadlist.cpp: "fresh fiber on restart"), each
+// resurrected thread switches onto a fresh fiber the moment it resumes, giving
+// it a valid ThreadState before any traced call.
+extern void *__tsan_create_fiber(unsigned flags) __attribute__((weak));
+extern void __tsan_switch_to_fiber(void *fiber, unsigned flags)
+    __attribute__((weak));
+extern void __tsan_destroy_fiber(void *fiber) __attribute__((weak));
+
+// TSan fork syscall hooks (weak). `_Fork()` bypasses libtsan's fork()
+// interceptor, so TSan's BeforeFork/AfterFork pipeline never runs: the child
+// inherits TSan's runtime with internal locks still held and a ThreadRegistry
+// full of now-dead parent threads. The first instrumented call in the child
+// then faults. Bracketing `_Fork()` with these hooks re-runs that pipeline --
+// pre acquires TSan's internal locks (parent), post releases them and, in the
+// child, scrubs the registry down to the calling thread. This MUST happen
+// before any fiber work, since __tsan_create_fiber itself touches the registry.
+extern void __sanitizer_syscall_pre_impl_fork(void) __attribute__((weak));
+extern void __sanitizer_syscall_post_impl_fork(long res) __attribute__((weak));
+
+// libc's internal clone (NOT intercepted by libtsan, unlike the public
+// clone()). libtsan's clone() interceptor treats every call as a fork
+// (ForkChildAfter), which corrupts its thread-slot state for the
+// CLONE_THREAD clone restart_child_threads_fast() performs below. __clone is
+// not intercepted, so it performs the raw thread creation; the recreated
+// thread's own fiber switch (see thread_handle_after_dmtcp_restart()) then
+// gives it a valid TSan ThreadState.
+extern int __clone(int (*fn)(void *), void *child_stack, int flags,
+                    void *arg, ... /* pid_t *ptid, void *newtls, pid_t *ctid */);
 
 // We probably won't need the '#undef', but just in case a .h file defined it:
 #undef dmtcp_mcmini_is_loaded
@@ -111,6 +148,16 @@ static inline pid_t patchThreadDescriptor(pthread_t pthreadSelf) {
   return oldtid;
 }
 
+// Read-only sibling of patchThreadDescriptor(): returns the tid recorded in
+// `pthread_descriptor` without mutating it. Used to look up the checkpoint
+// thread's tid (a *different* thread's descriptor) from the template thread;
+// patchThreadDescriptor() is only ever called by a thread on its own
+// descriptor.
+static inline pid_t get_tid_from_pthread_descriptor(pthread_t pthread_descriptor) {
+  int offset = pthreadDescriptorTidOffset();
+  return *(pid_t *)((char *)pthread_descriptor + offset);
+}
+
 static void saveThreadStateBeforeFork(struct threadinfo* threadInfo) {
   threadInfo->origTid = syscall(SYS_gettid);
 
@@ -163,7 +210,9 @@ void restart_child_threads_fast(void) {
     pid_t *ctid = (pid_t*)((char*)threadInfos[i].pthread_descriptor + offset);
     pid_t *ptid = ctid;
     // For more insight, read 'man set_tid_address'.
-    clone(child_setcontext_fast,
+    // R3: use libc's raw __clone, not the public clone() (see the __clone
+    // extern declaration above for why).
+    __clone(child_setcontext_fast,
                       stack,
                       clone_flags,
                       (void *)&threadInfos[i], ptid, threadInfos[i].fs, ctid);
@@ -193,7 +242,16 @@ pid_t fast_multithreaded_fork(void) {
    *********************************************************************/
 #if 1
   pid_t _Fork();
+  // Re-run TSan's fork pipeline around the raw _Fork() (see the syscall-hook
+  // declarations above). pre = BeforeFork (parent acquires TSan locks);
+  // post = AfterFork (release; child scrubs the ThreadRegistry).
+  if (__sanitizer_syscall_pre_impl_fork != NULL) {
+    __sanitizer_syscall_pre_impl_fork();
+  }
   int childpid = _Fork();
+  if (__sanitizer_syscall_post_impl_fork != NULL) {
+    __sanitizer_syscall_post_impl_fork(childpid);
+  }
 #else
   // NOT YET FULLY DEVELOPED:
   int flags = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD;
@@ -225,6 +283,15 @@ int clone(int (*fn)(void *arg), void *child_stack, int flags, void *arg,
 # endif
 #endif
   if (childpid == 0) { // child process
+    // R4 (remainder): the forking thread keeps its inherited (fork-copied)
+    // TSan ThreadState, whose shadow call stack starts at the parent's
+    // fork-time depth and can overflow as this thread keeps running. Switch
+    // it onto a fresh fiber too, mirroring the recreated-thread fiber switch
+    // in thread_handle_after_dmtcp_restart(). Weak symbol: a no-op for
+    // non-TSan targets.
+    if (__tsan_switch_to_fiber != NULL) {
+      __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
+    }
     restart_child_threads_fast();
   }
   return childpid;
@@ -256,7 +323,16 @@ void thread_handle_after_dmtcp_restart(void) {
     notify_template_thread();
   }
   else {
-    // Returned from `getcontext()` in the forked child
+    // Returned from `getcontext()` in the forked child: this thread was just
+    // resurrected by `restart_child_threads_fast` via clone() + setcontext.
+    // Before any TSAN-intercepted call below, switch onto a fresh TSAN fiber so
+    // this OS thread has a valid ThreadState (clone() bypassed libtsan's
+    // pthread_create registration, leaving cur_thread() torn). Weak symbol: a
+    // no-op for non-TSAN targets. The fiber is intentionally not destroyed --
+    // the branch process is short-lived and exits after one trace.
+    if (__tsan_switch_to_fiber != NULL) {
+      __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
+    }
   }
 
   switch (mode_on_entry) {
@@ -329,15 +405,65 @@ static void *template_thread(void *unused) {
     mc_exit(EXIT_FAILURE);
   }
 
-  while ((entry = readdir(dp)))
-    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-      thread_count++;
+  const pid_t self_tid = syscall(SYS_gettid);
+  const pid_t ckpt_tid = get_tid_from_pthread_descriptor(ckpt_pthread_descriptor);
 
-  // We don't want to count the template thread nor
-  // the checkpoint thread, but these will appear in
-  // `/proc/self/tasks`
-  thread_count -= 2;
+  // Self-check: get_tid_from_pthread_descriptor() reads the same offset that
+  // patchThreadDescriptor() already relies on and that saveThreadStateBeforeFork()
+  // already self-verifies for `pthread_self()` on every restart. Confirm the
+  // read-only variant agrees for the template thread's own descriptor before
+  // trusting it to read the checkpoint thread's descriptor above.
+  if (get_tid_from_pthread_descriptor(pthread_self()) != self_tid) {
+    fprintf(stderr,
+        "PID %d: template_thread(): get_tid_from_pthread_descriptor: "
+        "bad offset:\n        Run: DMTCP:util/check-pthread-tid-offset.c\n",
+        getpid());
+    libc_abort();
+  }
+
+  // We don't want to count the template thread itself, the checkpoint
+  // thread, or TSan-internal threads (e.g. libtsan's background thread,
+  // which blocks all signals at creation and never calls into libmcmini's
+  // wrappers, so it will never post to `dmtcp_restart_sem` below).
+  int self_tid_seen = 0;
+  int ckpt_tid_seen = 0;
+  while ((entry = readdir(dp))) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    pid_t tid = (pid_t)atoi(entry->d_name);
+    if (tid == self_tid || tid == ckpt_tid) {
+      if (tid == self_tid) {
+        self_tid_seen++;
+      }
+      if (tid == ckpt_tid) {
+        ckpt_tid_seen++;
+      }
+      continue;
+    }
+    if (thread_blocks_signal(tid, SIG_MULTITHREADED_FORK)) {
+      log_debug("Excluding TSan-internal thread %d from the restart barrier\n", tid);
+      continue;
+    }
+    thread_count++;
+  }
   closedir(dp);
+
+  // If either tid was not seen exactly once in /proc/self/task, the
+  // classification above is unreliable: the checkpoint thread's (or, in
+  // principle, the template thread's) real entry may have fallen through
+  // into the countable branch, silently corrupting `thread_count` and
+  // hanging the barrier loop below forever with no diagnostic. Abort loudly
+  // instead.
+  if (self_tid_seen != 1 || ckpt_tid_seen != 1) {
+    fprintf(stderr,
+        "PID %d: template_thread(): tid sanity check failed while walking "
+        "/proc/self/task: self_tid=%d seen %d time(s) (expected 1), "
+        "ckpt_tid=%d seen %d time(s) (expected 1)\n",
+        getpid(), self_tid, self_tid_seen, ckpt_tid, ckpt_tid_seen);
+    libc_abort();
+  }
+
   log_debug(
       "There are %d threads... waiting for them to get into a consistent "
       "state...\n",
@@ -535,7 +661,15 @@ __attribute__((constructor)) void libmcmini_event_late_init() {
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   libpthread_sem_init(&template_thread_sem, 0, 0);
-  libdmtcp_pthread_create(&template_thread_id, &attr, &template_thread, NULL);
+  // Create via the PUBLIC pthread_create (not libdmtcp_pthread_create) so that,
+  // when the target is instrumented, libtsan's pthread_create interceptor sees
+  // and registers this thread -- otherwise its (absent) TSAN ThreadState makes
+  // restart crash inside libtsan's setjmp/longjmp restore. mc_pthread_create
+  // recognizes the flag and still routes the actual creation through DMTCP
+  // without user-thread machinery. See TSAN-McMini-DMTCP.txt.
+  mc_creating_internal_thread = 1;
+  pthread_create(&template_thread_id, &attr, &template_thread, NULL);
+  mc_creating_internal_thread = 0;
   pthread_attr_destroy(&attr);
 }
 

@@ -1,3 +1,4 @@
+#include "mcmini/mem.h"
 #include "mcmini/spy/checkpointing/record.h"
 #include "mcmini/spy/checkpointing/rec_list.h"
 #include "mcmini/spy/checkpointing/objects.h"
@@ -72,6 +73,24 @@ rec_list *add_rec_entry_record_mode(const visible_object *vo) {
     current_record_mode = new_node;
   }
   else {
+    current_record_mode->next = new_node;
+    current_record_mode = new_node;
+  }
+  return new_node;
+}
+
+// TSan-safe variant: identical to add_rec_entry_record_mode but backed by
+// mc_ts_alloc (no malloc), for use before libtsan has registered the calling
+// thread. `new_node->vo = *vo` compiles to inline stores (verified: no memcpy
+// libcall), so this whole function stays free of TSan interceptors.
+rec_list *add_rec_entry_record_mode_ts(const visible_object *vo) {
+  rec_list *new_node = (rec_list *)mc_ts_alloc(sizeof(rec_list));
+  new_node->vo = *vo;
+  new_node->next = NULL;
+  if (head_record_mode == NULL) {
+    head_record_mode = new_node;
+    current_record_mode = new_node;
+  } else {
     current_record_mode->next = new_node;
     current_record_mode = new_node;
   }

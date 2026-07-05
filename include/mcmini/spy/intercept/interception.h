@@ -29,6 +29,16 @@ int libdmtcp_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 int pthread_join(pthread_t thread, void**);
 int libpthread_pthread_join(pthread_t thread, void**);
 int libdmtcp_pthread_join(pthread_t thread, void**);
+// TSan-safe (libtsan-bypassing) handle for pthread_timedjoin_np, used by
+// mc_pthread_join's RECORD loop. Calling pthread_timedjoin_np directly resolves
+// to libtsan's interceptor, which trips a thread-registry CHECK. See
+// TSAN-McMini-DMTCP.txt.
+int libpthread_timedjoin_np(pthread_t thread, void**, const struct timespec*);
+
+MCMINI_NO_RETURN void pthread_exit(void *);
+// TSan-safe (libtsan-bypassing) handle for pthread_exit, used by
+// mc_pthread_exit's pre-restart forwarding path.
+MCMINI_NO_RETURN void libpthread_pthread_exit(void *);
 
 int libpthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
 int libpthread_mutex_lock(pthread_mutex_t *);
