@@ -50,6 +50,16 @@ extern void __tsan_destroy_fiber(void *fiber) __attribute__((weak));
 extern void __sanitizer_syscall_pre_impl_fork(void) __attribute__((weak));
 extern void __sanitizer_syscall_post_impl_fork(long res) __attribute__((weak));
 
+// libc's internal clone (NOT intercepted by libtsan, unlike the public
+// clone()). libtsan's clone() interceptor treats every call as a fork
+// (ForkChildAfter), which corrupts its thread-slot state for the
+// CLONE_THREAD clone restart_child_threads_fast() performs below. __clone is
+// not intercepted, so it performs the raw thread creation; the recreated
+// thread's own fiber switch (see thread_handle_after_dmtcp_restart()) then
+// gives it a valid TSan ThreadState.
+extern int __clone(int (*fn)(void *), void *child_stack, int flags,
+                    void *arg, ... /* pid_t *ptid, void *newtls, pid_t *ctid */);
+
 // We probably won't need the '#undef', but just in case a .h file defined it:
 #undef dmtcp_mcmini_is_loaded
 int dmtcp_mcmini_is_loaded(void) { return 1; }
@@ -200,7 +210,9 @@ void restart_child_threads_fast(void) {
     pid_t *ctid = (pid_t*)((char*)threadInfos[i].pthread_descriptor + offset);
     pid_t *ptid = ctid;
     // For more insight, read 'man set_tid_address'.
-    clone(child_setcontext_fast,
+    // R3: use libc's raw __clone, not the public clone() (see the __clone
+    // extern declaration above for why).
+    __clone(child_setcontext_fast,
                       stack,
                       clone_flags,
                       (void *)&threadInfos[i], ptid, threadInfos[i].fs, ctid);
@@ -271,6 +283,15 @@ int clone(int (*fn)(void *arg), void *child_stack, int flags, void *arg,
 # endif
 #endif
   if (childpid == 0) { // child process
+    // R4 (remainder): the forking thread keeps its inherited (fork-copied)
+    // TSan ThreadState, whose shadow call stack starts at the parent's
+    // fork-time depth and can overflow as this thread keeps running. Switch
+    // it onto a fresh fiber too, mirroring the recreated-thread fiber switch
+    // in thread_handle_after_dmtcp_restart(). Weak symbol: a no-op for
+    // non-TSan targets.
+    if (__tsan_switch_to_fiber != NULL) {
+      __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
+    }
     restart_child_threads_fast();
   }
   return childpid;
