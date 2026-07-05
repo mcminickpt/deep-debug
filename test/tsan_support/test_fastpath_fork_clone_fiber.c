@@ -15,8 +15,9 @@
 //
 // The forking-thread fiber switch (the R4 remainder, as opposed to the
 // recreated-thread fiber switch, which was already proven separately) is
-// included here for structural completeness and does execute in both
-// build configurations' code paths, but it is NOT independently validated
+// included here for structural completeness and executes in the default
+// (fixed) build (compiled out in the buggy build alongside R3), but it is
+// NOT independently validated
 // by this harness: the forking thread is just main(), which only does a
 // handful of sem_wait/sem_post/fprintf calls after the fork before
 // _exit(), never enough post-fork instrumented work to trigger the
