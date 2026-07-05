@@ -35,10 +35,10 @@ int libdmtcp_pthread_join(pthread_t thread, void**);
 // TSAN-McMini-DMTCP.txt.
 int libpthread_timedjoin_np(pthread_t thread, void**, const struct timespec*);
 
-void pthread_exit(void *) __attribute__((__noreturn__));
+MCMINI_NO_RETURN void pthread_exit(void *);
 // TSan-safe (libtsan-bypassing) handle for pthread_exit, used by
 // mc_pthread_exit's pre-restart forwarding path.
-void libpthread_pthread_exit(void *) __attribute__((__noreturn__));
+MCMINI_NO_RETURN void libpthread_pthread_exit(void *);
 
 int libpthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
 int libpthread_mutex_lock(pthread_mutex_t *);
