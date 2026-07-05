@@ -23,6 +23,32 @@
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
 
+// ThreadSanitizer Fiber API (weak: resolves to the TSAN runtime only for TSAN
+// targets, NULL no-op otherwise). A "fiber" is a TSAN ThreadState decoupled
+// from the OS thread. `multithreaded_fork` recreates the pre-checkpoint threads
+// with clone() + setcontext (so their original %fs/TLS and pthread descriptor
+// are preserved and libmcmini does not intercept the creation). But clone()
+// means libtsan never registered these threads, so their cur_thread() is torn
+// on resume and the first TSAN-intercepted call (e.g. munmap) faults. Mirroring
+// DMTCP's own restore fix (threadlist.cpp: "fresh fiber on restart"), each
+// resurrected thread switches onto a fresh fiber the moment it resumes, giving
+// it a valid ThreadState before any traced call.
+extern void *__tsan_create_fiber(unsigned flags) __attribute__((weak));
+extern void __tsan_switch_to_fiber(void *fiber, unsigned flags)
+    __attribute__((weak));
+extern void __tsan_destroy_fiber(void *fiber) __attribute__((weak));
+
+// TSan fork syscall hooks (weak). `_Fork()` bypasses libtsan's fork()
+// interceptor, so TSan's BeforeFork/AfterFork pipeline never runs: the child
+// inherits TSan's runtime with internal locks still held and a ThreadRegistry
+// full of now-dead parent threads. The first instrumented call in the child
+// then faults. Bracketing `_Fork()` with these hooks re-runs that pipeline --
+// pre acquires TSan's internal locks (parent), post releases them and, in the
+// child, scrubs the registry down to the calling thread. This MUST happen
+// before any fiber work, since __tsan_create_fiber itself touches the registry.
+extern void __sanitizer_syscall_pre_impl_fork(void) __attribute__((weak));
+extern void __sanitizer_syscall_post_impl_fork(long res) __attribute__((weak));
+
 // We probably won't need the '#undef', but just in case a .h file defined it:
 #undef dmtcp_mcmini_is_loaded
 int dmtcp_mcmini_is_loaded(void) { return 1; }
@@ -193,7 +219,16 @@ pid_t fast_multithreaded_fork(void) {
    *********************************************************************/
 #if 1
   pid_t _Fork();
+  // Re-run TSan's fork pipeline around the raw _Fork() (see the syscall-hook
+  // declarations above). pre = BeforeFork (parent acquires TSan locks);
+  // post = AfterFork (release; child scrubs the ThreadRegistry).
+  if (__sanitizer_syscall_pre_impl_fork != NULL) {
+    __sanitizer_syscall_pre_impl_fork();
+  }
   int childpid = _Fork();
+  if (__sanitizer_syscall_post_impl_fork != NULL) {
+    __sanitizer_syscall_post_impl_fork(childpid);
+  }
 #else
   // NOT YET FULLY DEVELOPED:
   int flags = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD;
@@ -256,7 +291,16 @@ void thread_handle_after_dmtcp_restart(void) {
     notify_template_thread();
   }
   else {
-    // Returned from `getcontext()` in the forked child
+    // Returned from `getcontext()` in the forked child: this thread was just
+    // resurrected by `restart_child_threads_fast` via clone() + setcontext.
+    // Before any TSAN-intercepted call below, switch onto a fresh TSAN fiber so
+    // this OS thread has a valid ThreadState (clone() bypassed libtsan's
+    // pthread_create registration, leaving cur_thread() torn). Weak symbol: a
+    // no-op for non-TSAN targets. The fiber is intentionally not destroyed --
+    // the branch process is short-lived and exits after one trace.
+    if (__tsan_switch_to_fiber != NULL) {
+      __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
+    }
   }
 
   switch (mode_on_entry) {
