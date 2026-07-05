@@ -20,6 +20,7 @@
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/spy/checkpointing/tsan_support.h"
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
 
@@ -135,6 +136,16 @@ static inline pid_t patchThreadDescriptor(pthread_t pthreadSelf) {
   // gettid() supported only in glibc-2.30; So, we use syscall().
   *(pid_t *)((char *)pthreadSelf + offset) = syscall(SYS_gettid);
   return oldtid;
+}
+
+// Read-only sibling of patchThreadDescriptor(): returns the tid recorded in
+// `pthread_descriptor` without mutating it. Used to look up the checkpoint
+// thread's tid (a *different* thread's descriptor) from the template thread;
+// patchThreadDescriptor() is only ever called by a thread on its own
+// descriptor.
+static inline pid_t get_tid_from_pthread_descriptor(pthread_t pthread_descriptor) {
+  int offset = pthreadDescriptorTidOffset();
+  return *(pid_t *)((char *)pthread_descriptor + offset);
 }
 
 static void saveThreadStateBeforeFork(struct threadinfo* threadInfo) {
@@ -373,14 +384,40 @@ static void *template_thread(void *unused) {
     mc_exit(EXIT_FAILURE);
   }
 
-  while ((entry = readdir(dp)))
-    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-      thread_count++;
+  const pid_t self_tid = syscall(SYS_gettid);
+  const pid_t ckpt_tid = get_tid_from_pthread_descriptor(ckpt_pthread_descriptor);
 
-  // We don't want to count the template thread nor
-  // the checkpoint thread, but these will appear in
-  // `/proc/self/tasks`
-  thread_count -= 2;
+  // Self-check: get_tid_from_pthread_descriptor() reads the same offset that
+  // patchThreadDescriptor() already relies on and that saveThreadStateBeforeFork()
+  // already self-verifies for `pthread_self()` on every restart. Confirm the
+  // read-only variant agrees for the template thread's own descriptor before
+  // trusting it to read the checkpoint thread's descriptor above.
+  if (get_tid_from_pthread_descriptor(pthread_self()) != self_tid) {
+    fprintf(stderr,
+        "PID %d: template_thread(): get_tid_from_pthread_descriptor: "
+        "bad offset:\n        Run: DMTCP:util/check-pthread-tid-offset.c\n",
+        getpid());
+    libc_abort();
+  }
+
+  // We don't want to count the template thread itself, the checkpoint
+  // thread, or TSan-internal threads (e.g. libtsan's background thread,
+  // which blocks all signals at creation and never calls into libmcmini's
+  // wrappers, so it will never post to `dmtcp_restart_sem` below).
+  while ((entry = readdir(dp))) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    pid_t tid = (pid_t)atoi(entry->d_name);
+    if (tid == self_tid || tid == ckpt_tid) {
+      continue;
+    }
+    if (thread_blocks_signal(tid, SIG_MULTITHREADED_FORK)) {
+      log_debug("Excluding TSan-internal thread %d from the restart barrier\n", tid);
+      continue;
+    }
+    thread_count++;
+  }
   closedir(dp);
   log_debug(
       "There are %d threads... waiting for them to get into a consistent "
