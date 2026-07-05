@@ -475,7 +475,11 @@ MCMINI_NO_RETURN void mc_pthread_exit(void *retval) {
       libpthread_pthread_exit(retval);
     }
     case DMTCP_RESTART_INTO_BRANCH:
-    case DMTCP_RESTART_INTO_TEMPLATE:
+    case DMTCP_RESTART_INTO_TEMPLATE: {
+      thread_get_mailbox()->type = THREAD_EXIT_TYPE;
+      thread_handle_after_dmtcp_restart();
+      // Fallthrough
+    }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
       if (tid_self == RID_MAIN_THREAD) {
