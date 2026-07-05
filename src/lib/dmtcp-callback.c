@@ -404,12 +404,20 @@ static void *template_thread(void *unused) {
   // thread, or TSan-internal threads (e.g. libtsan's background thread,
   // which blocks all signals at creation and never calls into libmcmini's
   // wrappers, so it will never post to `dmtcp_restart_sem` below).
+  int self_tid_seen = 0;
+  int ckpt_tid_seen = 0;
   while ((entry = readdir(dp))) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     pid_t tid = (pid_t)atoi(entry->d_name);
     if (tid == self_tid || tid == ckpt_tid) {
+      if (tid == self_tid) {
+        self_tid_seen++;
+      }
+      if (tid == ckpt_tid) {
+        ckpt_tid_seen++;
+      }
       continue;
     }
     if (thread_blocks_signal(tid, SIG_MULTITHREADED_FORK)) {
@@ -419,6 +427,22 @@ static void *template_thread(void *unused) {
     thread_count++;
   }
   closedir(dp);
+
+  // If either tid was not seen exactly once in /proc/self/task, the
+  // classification above is unreliable: the checkpoint thread's (or, in
+  // principle, the template thread's) real entry may have fallen through
+  // into the countable branch, silently corrupting `thread_count` and
+  // hanging the barrier loop below forever with no diagnostic. Abort loudly
+  // instead.
+  if (self_tid_seen != 1 || ckpt_tid_seen != 1) {
+    fprintf(stderr,
+        "PID %d: template_thread(): tid sanity check failed while walking "
+        "/proc/self/task: self_tid=%d seen %d time(s) (expected 1), "
+        "ckpt_tid=%d seen %d time(s) (expected 1)\n",
+        getpid(), self_tid, self_tid_seen, ckpt_tid, ckpt_tid_seen);
+    libc_abort();
+  }
+
   log_debug(
       "There are %d threads... waiting for them to get into a consistent "
       "state...\n",
