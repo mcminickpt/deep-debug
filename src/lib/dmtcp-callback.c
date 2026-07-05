@@ -405,21 +405,34 @@ static void *template_thread(void *unused) {
     mc_exit(EXIT_FAILURE);
   }
 
-  const pid_t self_tid = syscall(SYS_gettid);
-  const pid_t ckpt_tid = get_tid_from_pthread_descriptor(ckpt_pthread_descriptor);
+  // syscall(SYS_gettid) is DMTCP-virtualized under restart -- confirmed
+  // empirically against a real DMTCP restart, where a raw gettid() and the
+  // real, /proc/self/task-visible tid for the same thread differed. Since the
+  // barrier walk below compares against /proc/self/task (always a real,
+  // unvirtualized kernel view), self_tid/ckpt_tid must be translated back to
+  // real tids the same way `mcmini_real_pid()` already does for getpid()/
+  // getppid() elsewhere in this file, or they can never match anything in
+  // that walk and the sanity check below trips unconditionally.
+  const pid_t raw_self_tid = syscall(SYS_gettid);
 
   // Self-check: get_tid_from_pthread_descriptor() reads the same offset that
   // patchThreadDescriptor() already relies on and that saveThreadStateBeforeFork()
   // already self-verifies for `pthread_self()` on every restart. Confirm the
-  // read-only variant agrees for the template thread's own descriptor before
-  // trusting it to read the checkpoint thread's descriptor above.
-  if (get_tid_from_pthread_descriptor(pthread_self()) != self_tid) {
+  // read-only variant agrees for the template thread's own descriptor --
+  // compared raw-to-raw, since both sides come from the same virtualized
+  // syscall(SYS_gettid) source and translating either side first would only
+  // add a redundant pass through DMTCP's pid table -- before trusting it to
+  // read the checkpoint thread's descriptor below.
+  if (get_tid_from_pthread_descriptor(pthread_self()) != raw_self_tid) {
     fprintf(stderr,
         "PID %d: template_thread(): get_tid_from_pthread_descriptor: "
         "bad offset:\n        Run: DMTCP:util/check-pthread-tid-offset.c\n",
-        getpid());
+        mcmini_real_pid(getpid()));
     libc_abort();
   }
+
+  const pid_t self_tid = mcmini_real_pid(raw_self_tid);
+  const pid_t ckpt_tid = mcmini_real_pid(get_tid_from_pthread_descriptor(ckpt_pthread_descriptor));
 
   // We don't want to count the template thread itself, the checkpoint
   // thread, or TSan-internal threads (e.g. libtsan's background thread,
@@ -460,7 +473,7 @@ static void *template_thread(void *unused) {
         "PID %d: template_thread(): tid sanity check failed while walking "
         "/proc/self/task: self_tid=%d seen %d time(s) (expected 1), "
         "ckpt_tid=%d seen %d time(s) (expected 1)\n",
-        getpid(), self_tid, self_tid_seen, ckpt_tid, ckpt_tid_seen);
+        mcmini_real_pid(getpid()), self_tid, self_tid_seen, ckpt_tid, ckpt_tid_seen);
     libc_abort();
   }
 
