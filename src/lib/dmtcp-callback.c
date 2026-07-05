@@ -53,12 +53,23 @@ extern void __sanitizer_syscall_post_impl_fork(long res) __attribute__((weak));
 // libc's internal clone (NOT intercepted by libtsan, unlike the public
 // clone()). libtsan's clone() interceptor treats every call as a fork
 // (ForkChildAfter), which corrupts its thread-slot state for the
-// CLONE_THREAD clone restart_child_threads_fast() performs below. __clone is
-// not intercepted, so it performs the raw thread creation; the recreated
-// thread's own fiber switch (see thread_handle_after_dmtcp_restart()) then
-// gives it a valid TSan ThreadState.
-extern int __clone(int (*fn)(void *), void *child_stack, int flags,
-                    void *arg, ... /* pid_t *ptid, void *newtls, pid_t *ctid */);
+// CLONE_THREAD clone restart_child_threads_fast() performs below.
+//
+// DMTCP ALSO strongly exports its own `__clone` (threadwrappers.cpp), which
+// unconditionally aborts unless the calling thread is mid-DMTCP's-own
+// pthread_create -- confirmed empirically against a real DMTCP restart:
+// "ASSERT ... Thread creation with clone syscall is not supported". Calling
+// the symbol `__clone` directly hits THAT interceptor, not libc's real
+// implementation, exactly like the public clone() hits libtsan's. Bypass
+// both via libc_clone() (interception.c), which resolves the real __clone
+// once at process startup -- well before any fork/checkpoint -- alongside
+// this codebase's other real-libc forwarding functions (libc_abort(),
+// libc_fork(), ...), rather than re-resolving it here via a fresh
+// post-_Fork() dlopen/dlsym (which would risk deadlocking on a dynamic-
+// linker lock left held by a thread that no longer exists in the child).
+// The recreated thread's own fiber switch (see
+// thread_handle_after_dmtcp_restart()) then gives it a valid TSan
+// ThreadState.
 
 // We probably won't need the '#undef', but just in case a .h file defined it:
 #undef dmtcp_mcmini_is_loaded
@@ -210,12 +221,13 @@ void restart_child_threads_fast(void) {
     pid_t *ctid = (pid_t*)((char*)threadInfos[i].pthread_descriptor + offset);
     pid_t *ptid = ctid;
     // For more insight, read 'man set_tid_address'.
-    // R3: use libc's raw __clone, not the public clone() (see the __clone
-    // extern declaration above for why).
-    __clone(child_setcontext_fast,
-                      stack,
-                      clone_flags,
-                      (void *)&threadInfos[i], ptid, threadInfos[i].fs, ctid);
+    // R3: use libc's raw __clone (via libc_clone(), see above), bypassing
+    // both libtsan's and DMTCP's own interception of the public clone()/
+    // __clone symbols.
+    libc_clone(child_setcontext_fast,
+               stack,
+               clone_flags,
+               (void *)&threadInfos[i], ptid, (void *)threadInfos[i].fs, ctid);
   }
 }
 

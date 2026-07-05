@@ -75,3 +75,12 @@ void abort(void);
 MCMINI_NO_RETURN void libc_abort(void);
 
 pid_t libc_fork(void);
+
+// Real, uninterposed __clone. Both libtsan (via its public clone()
+// interceptor) and DMTCP (via its own strongly-exported __clone in
+// threadwrappers.cpp, which aborts unless called from DMTCP's own
+// pthread_create) intercept thread creation; restart_child_threads_fast()
+// (dmtcp-callback.c) needs the raw libc primitive to bypass both. See
+// TSAN-McMini-DMTCP.txt.
+int libc_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+               void *ptid, void *newtls, void *ctid);

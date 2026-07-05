@@ -39,6 +39,7 @@ typeof(&sleep) sleep_ptr;
 __attribute__((__noreturn__)) typeof(&exit) exit_ptr;
 __attribute__((__noreturn__)) typeof(&abort) abort_ptr;
 typeof(&fork) fork_ptr;
+typeof(&libc_clone) clone_ptr;
 
 void libmcmini_init(void) {
   pthread_once(&libmcini_init, &mc_load_intercepted_pthread_functions);
@@ -95,6 +96,7 @@ void mc_load_intercepted_pthread_functions(void) {
   exit_ptr = dlsym(libc_handle, "exit");
   abort_ptr = dlsym(libc_handle, "abort");
   fork_ptr = dlsym(libc_handle, "fork");
+  clone_ptr = dlsym(libc_handle, "__clone");
   dlclose(libpthread_handle);
   dlclose(libc_handle);
 
@@ -279,6 +281,11 @@ MCMINI_NO_RETURN void libc_exit(int status) {
 pid_t libc_fork(void) {
   libmcmini_init();
   return (*fork_ptr)();
+}
+int libc_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+               void *ptid, void *newtls, void *ctid) {
+  libmcmini_init();
+  return (*clone_ptr)(fn, child_stack, flags, arg, ptid, newtls, ctid);
 }
 
 int sem_init(sem_t*sem, int p, unsigned count) {
