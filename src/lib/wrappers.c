@@ -21,34 +21,49 @@ typedef struct pthread_map {
     struct pthread_map *next;
 } pthread_map_t;
 
-static pthread_rwlock_t pthread_map_lock = PTHREAD_RWLOCK_INITIALIZER;
+// NOTE: This lock and allocator must be TSan-safe: insert_pthread_map runs from
+// mc_thread_routine_wrapper's prologue, which under DMTCP executes before
+// libtsan has registered the thread. So we use libmcmini's libpthread_* handle
+// wrappers (which bypass libtsan) rather than the raw pthread_rwlock_* symbols
+// (which resolve to libtsan's interceptors), and mc_ts_alloc rather than malloc.
+// See TSAN-McMini-DMTCP.txt.
+static pthread_mutex_t pthread_map_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_map_t *head = NULL;
 
 void insert_pthread_map(pthread_t t, runner_id_t v) {
-    pthread_rwlock_wrlock(&pthread_map_lock);
-    pthread_map_t *n = malloc(sizeof *n);
+    libpthread_mutex_lock(&pthread_map_lock);
+    pthread_map_t *n = mc_ts_alloc(sizeof *n);
     n->thread = t;
     n->value = v;
     n->next = head;
     head = n;
-    pthread_rwlock_unlock(&pthread_map_lock);
+    libpthread_mutex_unlock(&pthread_map_lock);
 }
 
 runner_id_t search_pthread_map(pthread_t t) {
-  pthread_rwlock_rdlock(&pthread_map_lock);
-    pthread_map_t *cur = head;
-    while (cur) {
+    libpthread_mutex_lock(&pthread_map_lock);
+    runner_id_t result = RID_INVALID;
+    for (pthread_map_t *cur = head; cur != NULL; cur = cur->next) {
         if (pthread_equal(cur->thread, t)) {
-            return cur->value;
+            result = cur->value;
+            break;
         }
-        cur = cur->next;
     }
-    pthread_rwlock_unlock(&pthread_map_lock);
-    return RID_INVALID;
+    libpthread_mutex_unlock(&pthread_map_lock);
+    return result;
 }
 
 
 MCMINI_THREAD_LOCAL runner_id_t tid_self = RID_INVALID;
+
+// Set (on the creating thread) while libmcmini creates one of its OWN helper
+// threads (e.g. the template thread) via the public pthread_create. It tells
+// mc_pthread_create to create the thread plainly -- routed through DMTCP and
+// visible to any sanitizer's pthread_create interceptor -- rather than treating
+// it as a user thread to be model-checked. Keeping it visible to
+// ThreadSanitizer is what lets its ThreadState round-trip checkpoint/restart.
+// See TSAN-McMini-DMTCP.txt.
+MCMINI_THREAD_LOCAL int mc_creating_internal_thread = 0;
 
 runner_id_t mc_register_this_thread(void) {
   static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
@@ -450,6 +465,35 @@ MCMINI_NO_RETURN void mc_transparent_abort(void) {
   }
 }
 
+MCMINI_NO_RETURN void mc_pthread_exit(void *retval) {
+  switch (get_current_mode()) {
+    case PRE_DMTCP_INIT:
+    case PRE_CHECKPOINT_THREAD:
+    case CHECKPOINT_THREAD:
+    case RECORD:
+    case PRE_CHECKPOINT: {
+      libpthread_pthread_exit(retval);
+    }
+    case DMTCP_RESTART_INTO_BRANCH:
+    case DMTCP_RESTART_INTO_TEMPLATE: {
+      thread_get_mailbox()->type = THREAD_EXIT_TYPE;
+      thread_handle_after_dmtcp_restart();
+      // Fallthrough
+    }
+    case TARGET_BRANCH:
+    case TARGET_BRANCH_AFTER_RESTART: {
+      if (tid_self == RID_MAIN_THREAD) {
+        mc_exit_main_thread_in_child();
+      } else {
+        mc_exit_thread_in_child();
+      }
+    }
+    default: {
+      libc_abort();
+    }
+  }
+}
+
 struct mc_thread_routine_arg {
   void *arg;
   thread_routine routine;
@@ -491,7 +535,9 @@ void *mc_thread_routine_wrapper(void *arg) {
                            .thrd_state.pthread_desc = this_thread,
                            .thrd_state.status = ALIVE,
                            .thrd_state.id = rid};
-      thread_record = add_rec_entry_record_mode(&vo);
+      // TSan-safe allocation: under DMTCP this runs before libtsan has
+      // registered the thread (see TSAN-McMini-DMTCP.txt).
+      thread_record = add_rec_entry_record_mode_ts(&vo);
       libpthread_mutex_unlock(&rec_list_lock);
       libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
       break;
@@ -590,6 +636,17 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   // immediately after sending the `DMTCP_EVENT_INIT` to `libmcmini.so`
   // and creates no other threads during execution
   static pthread_once_t main_thread_once = PTHREAD_ONCE_INIT;
+
+  // libmcmini's own helper thread (e.g. the template thread). It reached us
+  // through the sanitizer's pthread_create interceptor (if any) -- so TSAN has
+  // already registered it and wrapped `routine` -- and we now just hand it to
+  // DMTCP so it is DMTCP-known, with no user-thread machinery. Creating it via
+  // the public pthread_create (rather than libdmtcp_pthread_create directly)
+  // is deliberate: it keeps the thread visible to libtsan, so its ThreadState
+  // survives checkpoint/restart. See TSAN-McMini-DMTCP.txt.
+  if (mc_creating_internal_thread) {
+    return libdmtcp_pthread_create(thread, attr, routine, arg);
+  }
 
   // TODO: Reduce code duplication here!
   switch (get_current_mode()) {
@@ -726,7 +783,10 @@ int mc_pthread_join(pthread_t t, void **rv) {
 
       struct timespec time = {.tv_sec = 2, .tv_nsec = 0};
       while (1) {
-        int rc = pthread_timedjoin_np(t, rv, &time);
+        // Use the libtsan-bypassing handle: a direct pthread_timedjoin_np would
+        // hit libtsan's interceptor and trip its thread-registry CHECK under
+        // DMTCP. See TSAN-McMini-DMTCP.txt.
+        int rc = libpthread_timedjoin_np(t, rv, &time);
         if (rc == 0) {  // Join succeeded
           libpthread_mutex_lock(&rec_list_lock);
           thread_record->vo.thrd_state.status = EXITED;

@@ -74,6 +74,7 @@ set(LIBMCMINI_C_SRC
   src/lib/sem-wrappers.c
   src/lib/template/loop.c
   src/lib/template/sig.c
+  src/lib/tsan_support.c
   src/lib/wrappers.c
   src/mcmini/Thread_queue.c
 )

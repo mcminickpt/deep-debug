@@ -1,0 +1,273 @@
+===============================================================================
+PLAN.txt -- Porting the TSAN multithreaded_fork recipe into deep-debug's
+            fast_multithreaded_fork()
+===============================================================================
+
+STATUS: proposal / not yet started.
+AUDIENCE: whoever integrates the standalone recipe (delivered as
+          multithreaded-fork-tsan-2.0.tar.gz) into libmcmini.
+
+-------------------------------------------------------------------------------
+0. GOAL
+-------------------------------------------------------------------------------
+Make model-check-from-checkpoint work when the target is built with
+ThreadSanitizer (-fsanitize=thread).  Concretely: after DMTCP restart, the
+template process must be able to repeatedly fast_multithreaded_fork() a branch
+child whose recreated threads run TSan-instrumented code (and are joined/exited)
+without deadlock, SIGSEGV, or "ThreadSanitizer: CHECK failed".
+
+The mechanism has already been proven in isolation (no DMTCP, no libmcmini) in
+the standalone package multithreaded-fork-tsan-2.0.  This document maps that
+recipe onto libmcmini's fast path and lists the deep-debug-specific differences.
+
+-------------------------------------------------------------------------------
+1. THE PROVEN RECIPE (from the standalone package)
+-------------------------------------------------------------------------------
+Five independent fixes, each a no-op for non-TSAN targets (weak symbols):
+
+  (R1) Skip TSan's background thread in the fork barrier.
+       libtsan's background thread is created with all signals blocked, so it
+       never participates; waiting for it deadlocks.  Detect via
+       /proc/self/task/<tid>/status "SigBlk" and exclude it; do not recreate it.
+
+  (R2) Re-run TSan's fork pipeline around the raw fork.
+       _Fork() bypasses libtsan's fork() interceptor.  Bracket it with
+       __sanitizer_syscall_pre_impl_fork() / __sanitizer_syscall_post_impl_fork()
+       so TSan does BeforeFork (parent: take locks) / AfterFork (child: drop
+       locks, scrub the ghost registry).
+
+  (R3) Recreate threads with libc __clone, NOT the public clone().
+       libtsan intercepts clone() and treats every call as a fork
+       (ForkChildAfter -> slot CHECK failure).  __clone is not intercepted.
+
+  (R4) Give every recreated thread -- and the child's forking thread -- a fresh
+       TSan fiber (__tsan_create_fiber + __tsan_switch_to_fiber) at its resume
+       point, so a clone()-made (TSan-invisible) thread has a valid ThreadState
+       before it runs instrumented code.
+
+  (R5) pthread_join / pthread_exit shim for recreated threads.
+       A recreated thread is a fiber, not a first-class TSan thread, so TSan's
+       pthread_join (registry lookup) and pthread_exit (real-thread assert) abort
+       on it.  Override both (libtsan's are weak):
+         - join:  reap via real libc join (bypass TSan registry), return the
+                  value the thread stashed on exit; forward non-recreated joins
+                  to TSan's interceptor.
+         - exit:  stash retval, switch to a fresh fiber, terminate with the raw
+                  exit syscall (no glibc unwind, no interceptor); the kernel's
+                  CLONE_CHILD_CLEARTID wakes the joiner.
+
+  Plus TSAN_OPTIONS="handle_segv=0 die_after_fork=0" and ASLR disabled / PIE.
+
+Known residual in the standalone: explicit pthread_exit() at high thread counts
+(~8 concurrent) has a rare (~1/30) shadow-stack overflow.  Exit-by-return, join,
+and no-exit are solid.
+
+-------------------------------------------------------------------------------
+2. THE DEEP-DEBUG TARGET CODE
+-------------------------------------------------------------------------------
+Runtime uses the "fast" variant, NOT src/common/multithreaded_fork.c (that file
+holds the signal-based version the recipe was developed against; its STANDALONE
+demo is the ancestor of the package).  The live code is in:
+
+  src/lib/dmtcp-callback.c
+    fast_multithreaded_fork()          -- _Fork(); if child, restart_child_threads_fast()
+    restart_child_threads_fast()       -- clone(child_setcontext_fast, ...) per thread
+    child_setcontext_fast()            -- setTLSPointer + patchThreadDescriptor + setcontext
+    thread_handle_after_dmtcp_restart()-- each userspace thread: getcontext -> threadInfos[]
+    template_thread()                  -- counts /proc/self/task-2, waits for stabilize, forks
+    presuspend_eventHook(DMTCP_EVENT_RESTART) -- allocates shm; resets SIGSEGV to SIG_DFL
+    libmcmini_event_late_init()        -- constructor; creates the template thread
+    struct threadinfo threadInfos[1000]
+
+  src/lib/wrappers.c
+    mc_pthread_join()                  -- libmcmini's join (mailbox in TARGET_BRANCH mode)
+    mc_creating_internal_thread        -- TLS flag from the committed template-thread fix
+  src/lib/interception.c
+    pthread_join()  (STRONG) -> mc_pthread_join()   [overrides libtsan's WEAK pthread_join]
+    pthread_create()(STRONG) -> mc_pthread_create()
+
+CRITICAL DIFFERENCE from the standalone: the fast path does NOT signal threads to
+snapshot context.  Instead each userspace thread, on resume after DMTCP restart,
+calls thread_handle_after_dmtcp_restart() (getcontext) to populate threadInfos[];
+the template_thread waits for "thread_count" of them to stabilize; then per branch
+it calls fast_multithreaded_fork(), and restart_child_threads_fast() re-clones the
+threadInfos[] entries.  So the barrier is a COUNT of stabilizing threads, not a
+signal round-trip.
+
+-------------------------------------------------------------------------------
+3. PER-FIX PORTING MAP
+-------------------------------------------------------------------------------
+(R1) background thread  --> template_thread() thread-count.
+     In the fast path the danger is NOT a signal barrier but template_thread()'s
+     "thread_count = (entries in /proc/self/task) - 2".  That count INCLUDES
+     libtsan's background thread, which never calls thread_handle_after_dmtcp_restart
+     and never posts dmtcp_restart_sem -> template_thread waits forever.
+     PORT: when counting, exclude threads that block signals / are TSan-internal
+     (reuse the standalone's SigBlk probe), and ensure such threads are NOT among
+     the threadInfos[] to be recreated.  VERIFY the exact deadlock reproduces
+     first (it may present as the "waiting for template thread to stabilize" hang
+     seen earlier).
+
+(R2) fork hooks  --> fast_multithreaded_fork(), around _Fork().  Direct port.
+     (A prototype of this already exists in the working tree; see section 5.)
+
+(R3) __clone  --> restart_child_threads_fast(): replace clone(...) with __clone(...).
+     Add the `extern int __clone(...)` decl.  Direct port.
+
+(R4) fibers  --> child_setcontext_fast() (per recreated thread, before setcontext)
+     AND fast_multithreaded_fork() child branch (the forking thread).  Add weak
+     __tsan_create_fiber / __tsan_switch_to_fiber decls.  NOTE: the recreated
+     thread resumes into thread_handle_after_dmtcp_restart()'s getcontext point;
+     put the fiber switch in child_setcontext_fast (cleanest) OR at that resume
+     point -- pick one, not both.
+
+(R5) join/exit  --> LIKELY SIMPLER than the standalone, because libmcmini already
+     owns pthread_join (interception.c:226, STRONG) -> mc_pthread_join.  libtsan's
+     pthread_join is WEAK, so libmcmini's wins and libtsan's ConsumeThreadUserId
+     never runs for the target's joins.  THEREFORE:
+        a. FIRST verify empirically whether the standalone's join CHECK-fail even
+           reproduces in a deep-debug branch.  It may not.
+        b. In TARGET_BRANCH mode joins are model-checked via the mailbox, not real
+           libc joins, so the retval-stash machinery may be unnecessary.
+        c. If mc_pthread_join's fallback path (libdmtcp_pthread_join / libpthread)
+           is taken for recreated threads and still trips TSan, port the bypass:
+           gate on mtf_is_recreated_thread() and use the real libc join.
+     pthread_exit: check whether libmcmini intercepts it at all; if the target can
+     call pthread_exit() in a branch, port the stash+fresh-fiber+raw-exit shim,
+     keyed on mtf_is_recreated_thread(pthread_self()).  Add the exit_retval field
+     to struct threadinfo and the mtf_set/get_exit_retval helpers.
+
+Helpers to port from the package into dmtcp-callback.c (or a new tsan_support.c):
+     mtf_in_child flag, mtf_is_recreated_thread(), mtf_set/get_exit_retval(),
+     and the weak __tsan_/__sanitizer_/__clone externs.
+
+-------------------------------------------------------------------------------
+4. KEY DIFFERENCES / RISKS vs THE STANDALONE
+-------------------------------------------------------------------------------
+D1. Barrier is a thread COUNT, not a signal round-trip (see R1) -- the background
+    thread manifests as a stabilization hang, not a barrier deadlock.
+D2. libmcmini already owns pthread_join (strong) -> R5 is probably lighter; verify.
+D3. Joins/exits in a branch are driven by the model checker (mailbox), a code path
+    the standalone never exercised.  Interactions with the fibers are unproven.
+D4. Everything in fast_multithreaded_fork / restart_child_threads_fast /
+    thread_handle_after_dmtcp_restart runs from the CHECKPOINTED libmcmini image.
+    Any change requires RE-RECORDING a checkpoint before it takes effect on restart.
+D5. ASLR is already disabled in deep-debug targets (personality(ADDR_NO_RANDOMIZE)),
+    so the standalone's ASLR requirement is already satisfied.  But confirm the
+    TSAN_OPTIONS in effect on restart include handle_segv=0 and die_after_fork=0
+    (record-time env + the --modify-env dmtcp_env.txt), and that the suppressions
+    file lists called_from_lib:libmcmini.so and called_from_lib:libdmtcp.so.
+D6. presuspend_eventHook resets SIGSEGV to SIG_DFL on restart (so a branch crash is
+    reported to mcmini via SIGCHLD).  Do NOT rely on a SIGSEGV handler surviving
+    restart for debugging; instrument at record time or use debug-restart-pause.
+D7. RESOLVED (Phase 4): the residual explicit-pthread_exit()-at-scale issue does
+    NOT matter here. Reproduced it in the standalone package directly (built
+    test_exit.c with NUM_WORKERS=8, ran 30x under real TSan: 1/30 runs crashed
+    with "stack smashing detected", matching the vendor's own ~1/30 rate) --
+    confirming the residual is real, but it is specific to the vendor's own
+    join/exit shim (tsan_join_shim.c), which performs a REAL pthread_exit() +
+    REAL pthread_join() on a recreated thread. McMini's production
+    mc_pthread_exit()/mc_pthread_join() never do this: TARGET_BRANCH* mode is
+    always a shared-memory mailbox handshake with the mcmini scheduler (see
+    Phase 3's R5 investigation). No McMini robustness work needed.
+
+-------------------------------------------------------------------------------
+5. PRECONDITION: CLEAN BASELINE
+-------------------------------------------------------------------------------
+The working tree currently has UNCOMMITTED experimental edits in
+src/lib/dmtcp-callback.c from the investigation, including:
+    - a debug SIGSEGV backtrace handler installed at record time,
+    - the DMTCP_EVENT_RESTART SIG_DFL reset commented out,
+    - a first-cut of the (R2) fork hooks and (R4) fiber switch.
+Before the real port:
+    1. `git diff src/lib/dmtcp-callback.c` and SEPARATE the throwaway debug
+       instrumentation (segv handler, disabled SIG_DFL reset) from the keepers
+       (fork-hook / fiber prototypes).
+    2. Revert the debug instrumentation; restore the SIG_DFL reset.
+    3. Start the port from the committed template-thread fix (commit 6c4aaa8 on
+       branch tsan-record-thread-fix) as the baseline.
+    4. Do the port on a fresh feature branch.
+
+-------------------------------------------------------------------------------
+6. PHASED IMPLEMENTATION
+-------------------------------------------------------------------------------
+Each phase ends at a re-recordable, testable state (rebuild libmcmini -> record a
+fresh checkpoint -> restart under mcmini; see section 7).
+
+  Phase 0  Baseline cleanup (section 5).  Reproduce and capture the CURRENT
+           TSAN-target restart failure from the clean baseline (expected: the
+           template-stabilization hang and/or the munmap/FuncEntry crash).
+
+  Phase 1  R1: exclude TSan-internal (signal-blocking) threads from
+           template_thread()'s thread_count and from threadInfos[] recreation.
+           Expected: template reaches "stable" without hanging.
+
+  Phase 2  R2 + R3 + R4 together (they are interdependent: R2 must precede R4,
+           R3 avoids the clone interceptor).  Bracket _Fork() with the sanitizer
+           fork hooks; switch restart_child_threads_fast to __clone; add the fresh
+           fiber in child_setcontext_fast and for the forking thread.
+           Expected: branch child runs and reaches the model-checker handshake
+           without SIGSEGV/CHECK.  This is the analog of the standalone "park"
+           test passing.
+
+  Phase 3  R5: run a real model-checking session on a TSAN target that joins
+           threads.  Verify whether TSan join/exit issues appear; port the bypass
+           only as needed (section 3, R5).  Analog of the standalone join/exit
+           tests.
+
+  Phase 4  Harden: multiple sequential branches (return_to_depth / repeated
+           fast_multithreaded_fork), higher thread counts, a couple of example
+           targets (src/examples/* built with -fsanitize=thread).  Address the
+           explicit-pthread_exit residual only if it shows up (D7).
+
+-------------------------------------------------------------------------------
+7. BUILD & TEST METHODOLOGY
+-------------------------------------------------------------------------------
+  * Build:   cmake --build build --target libmcmini
+  * Record:  dmtcp_launch --disable-alloc-plugin -i <sec> --with-plugin
+             <cwd>/libmcmini.so --modify-env <tsan_target>
+             with TSAN_OPTIONS="suppressions=<supp> handle_segv=0 die_after_fork=0"
+             (supp lists called_from_lib:libmcmini.so and :libdmtcp.so).
+             ==> A NEW checkpoint is required after every libmcmini rebuild (D4).
+  * Restart: setarch -R build/mcmini --from-checkpoint <ckpt> --multithreaded-fork
+             ./<tsan_target>
+  * Isolate first: the standalone package (multithreaded-fork-tsan-2.0) is the fast
+    iteration harness -- reproduce/prototype any sub-problem there (seconds per
+    run) before paying the record/restart cycle here.
+  * Debugging restart-time crashes: WSL logs the faulting RIP to `dmesg`
+    (grep RIP / segfault / CaptureCrash); map offsets with addr2line against
+    libtsan.so.2 / libmcmini.so.  For live inspection use
+    `dmtcp_restart --debug-restart-pause 3` + gdb (sets PR_SET_PTRACER_ANY),
+    since ptrace_scope=1 blocks attaching to non-descendants and mcmini's branch
+    children are not gdb descendants.
+
+  PASS CRITERIA (per phase): no deadlock/hang, no SIGSEGV, no
+  "ThreadSanitizer: CHECK failed", model checking makes progress / completes, and
+  results match the same target run without TSan.
+
+-------------------------------------------------------------------------------
+8. OPEN QUESTIONS / DECISIONS
+-------------------------------------------------------------------------------
+  Q1. Does the join CHECK-fail reproduce in a deep-debug branch at all, given
+      libmcmini's strong pthread_join?  (Determines how much of R5 is needed.)
+  Q2. Should the fast-path fixes ALSO be back-ported to src/common/
+      multithreaded_fork.c for consistency, or is dmtcp-callback.c the only live
+      path?  (multithreaded_fork.c still carries the signal-based version + the
+      STANDALONE demo.)
+  Q3. Where should the shared TSan-support code live -- inline in dmtcp-callback.c,
+      or a new src/lib/tsan_support.c + header shared with multithreaded_fork.c?
+  Q4. RESOLVED (Phase 4): no robustness work required -- see D7. Documented as a
+      vendor-package-only limitation that McMini's production code structurally
+      cannot hit, matching the standalone's own documented-not-fixed approach.
+  Q5. Are the __tsan_*/__sanitizer_* weak symbols guaranteed present in the libtsan
+      versions we target?  (Confirmed for libtsan.so.2 / gcc-14 here.)
+
+-------------------------------------------------------------------------------
+9. REFERENCES
+-------------------------------------------------------------------------------
+  * multithreaded-fork-tsan-2.0.tar.gz   -- the proven standalone recipe + README
+                                            (in this directory).
+  * TSAN-fork.md                          -- why fork/clone break TSan (background).
+  * TSAN-McMini-DMTCP.txt                 -- earlier thread-ordering / crash analysis.
+  * commit 6c4aaa8 (tsan-record-thread-fix)-- the template-thread fix (baseline).
+===============================================================================

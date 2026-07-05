@@ -16,6 +16,8 @@ typeof(&pthread_create) libpthread_pthread_create_ptr;
 typeof(&pthread_create) libdmtcp_pthread_create_ptr;
 typeof(&pthread_join) libpthread_pthread_join_ptr;
 typeof(&pthread_join) libdmtcp_pthread_join_ptr;
+typeof(&pthread_timedjoin_np) libpthread_timedjoin_np_ptr;
+__attribute__((__noreturn__)) typeof(&pthread_exit) libpthread_pthread_exit_ptr;
 typeof(&pthread_mutex_init) pthread_mutex_init_ptr;
 typeof(&pthread_mutex_lock) pthread_mutex_lock_ptr;
 typeof(&pthread_mutex_trylock) pthread_mutex_trylock_ptr;
@@ -37,6 +39,7 @@ typeof(&sleep) sleep_ptr;
 __attribute__((__noreturn__)) typeof(&exit) exit_ptr;
 __attribute__((__noreturn__)) typeof(&abort) abort_ptr;
 typeof(&fork) fork_ptr;
+typeof(&libc_clone) clone_ptr;
 
 void libmcmini_init(void) {
   pthread_once(&libmcini_init, &mc_load_intercepted_pthread_functions);
@@ -69,6 +72,8 @@ void mc_load_intercepted_pthread_functions(void) {
 
   libpthread_pthread_create_ptr = dlsym(libpthread_handle, "pthread_create");
   libpthread_pthread_join_ptr = dlsym(libpthread_handle, "pthread_join");
+  libpthread_timedjoin_np_ptr = dlsym(libpthread_handle, "pthread_timedjoin_np");
+  libpthread_pthread_exit_ptr = dlsym(libpthread_handle, "pthread_exit");
   pthread_mutex_init_ptr = dlsym(libpthread_handle, "pthread_mutex_init");
   pthread_mutex_lock_ptr = dlsym(libpthread_handle, "pthread_mutex_lock");
   pthread_mutex_trylock_ptr = dlsym(libpthread_handle, "pthread_mutex_trylock");
@@ -91,6 +96,7 @@ void mc_load_intercepted_pthread_functions(void) {
   exit_ptr = dlsym(libc_handle, "exit");
   abort_ptr = dlsym(libc_handle, "abort");
   fork_ptr = dlsym(libc_handle, "fork");
+  clone_ptr = dlsym(libc_handle, "__clone");
   dlclose(libpthread_handle);
   dlclose(libc_handle);
 
@@ -228,9 +234,22 @@ int libpthread_pthread_join(pthread_t thread, void **rv) {
   libmcmini_init();
   return (*libpthread_pthread_join_ptr)(thread, rv);
 }
+int libpthread_timedjoin_np(pthread_t thread, void **rv,
+                            const struct timespec *abstime) {
+  libmcmini_init();
+  return (*libpthread_timedjoin_np_ptr)(thread, rv, abstime);
+}
 int libdmtcp_pthread_join(pthread_t thread, void **rv) {
   libmcmini_init();
   return (*libdmtcp_pthread_join_ptr)(thread, rv);
+}
+
+MCMINI_NO_RETURN void pthread_exit(void *retval) {
+  mc_pthread_exit(retval);
+}
+MCMINI_NO_RETURN void libpthread_pthread_exit(void *retval) {
+  libmcmini_init();
+  (*libpthread_pthread_exit_ptr)(retval);
 }
 
 void exit(int status) {
@@ -262,6 +281,11 @@ MCMINI_NO_RETURN void libc_exit(int status) {
 pid_t libc_fork(void) {
   libmcmini_init();
   return (*fork_ptr)();
+}
+int libc_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+               void *ptid, void *newtls, void *ctid) {
+  libmcmini_init();
+  return (*clone_ptr)(fn, child_stack, flags, arg, ptid, newtls, ctid);
 }
 
 int sem_init(sem_t*sem, int p, unsigned count) {
