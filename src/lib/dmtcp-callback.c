@@ -42,8 +42,6 @@ struct threadinfo {
   // tlsAddr only used in __aarch64__ and __riscv
   // In fact, __riscv has the address in a normal register, restored w/ context.
   unsigned long int tlsAddr;
-  // The kernel has a process-wide sigmask, and also a per-thread sigmask.
-  sigset_t thread_sigmask;
   // glibc:pthread_create and pthread_self use this, but not the clone call:
   pthread_t pthread_descriptor;
 } threadInfos[1000];
@@ -125,23 +123,19 @@ static void saveThreadStateBeforeFork(struct threadinfo* threadInfo) {
   threadInfo->pthread_descriptor = pthread_self();
   getTLSPointer(threadInfo);
 
-  // FIXME:  Add func fo get/set signals in child thread of child process.
-  //         and restore thread sigmask sfter setcontext.
-  pthread_sigmask(SIG_BLOCK, NULL, &threadInfo->thread_sigmask);
-  sigset_t sigtest;
-  pthread_sigmask(SIG_BLOCK, NULL, &sigtest);
-  sigdelset(&sigtest, SIG_MULTITHREADED_FORK);
-  if (! sigisemptyset(&sigtest)) {
-    fprintf(stderr, "PID %d: multithreaded_fork() not yet implemented"
-                    " for non-empty thread signaks\n", getpid());
-    libc_abort();
-  }
+  // No manual signal-mask save/restore needed: getcontext()/setcontext()
+  // already save/restore the blocked-signal set via ucontext_t's uc_sigmask,
+  // even when setcontext() resumes on a brand-new clone()'d OS thread (see
+  // child_setcontext_fast() below).
 }
 
 static int child_setcontext_fast(void *arg) {
   struct threadinfo* threadInfo = arg;
   setTLSPointer(threadInfo);
   patchThreadDescriptor(threadInfo->pthread_descriptor);
+  // Does not return: jumps to the getcontext() call site in
+  // thread_handle_after_dmtcp_restart(), restoring uc_sigmask (see
+  // saveThreadStateBeforeFork() above) along with the rest of the context.
   setcontext(&(threadInfo->context));
   return 0; // not reached
 }
