@@ -42,17 +42,17 @@ using namespace extensions;
 logger fps("fork");
 logger mfps("mtf");
 
-fork_process_source::fork_process_source(real_world::target&& tp)
+fork_process_source::fork_process_source(real_world::target &&tp)
     : fork_process_source(tp) {}
 
 fork_process_source::fork_process_source(
-    const real_world::target& target_program)
+    const real_world::target &target_program)
     : template_program(extensions::make_unique<target>(target_program)) {
   this->template_program->set_preload_libmcmini();
 }
 
 multithreaded_fork_process_source::multithreaded_fork_process_source(
-    const std::string& ckpt_file) {
+    const std::string &ckpt_file) {
   log_debug(mfps) << "Initialized mtf source with checkpoint file `"
                   << ckpt_file << "`";
   this->template_program = extensions::make_unique<dmtcp_target>(
@@ -71,7 +71,7 @@ multithreaded_fork_process_source::multithreaded_fork_process_source(
 }
 
 std::unique_ptr<process> fork_process_source::make_new_process() {
-  shared_memory_region* rw_region =
+  shared_memory_region *rw_region =
       xpc_resources::get_instance().get_rw_region();
 
   // 1. Set up phase (LD_PRELOAD, binary sempahores, template process creation)
@@ -91,18 +91,18 @@ std::unique_ptr<process> fork_process_source::make_new_process() {
   // 3. If the current template process is alive, tell it to spawn a new
   // process and then wait for it to successfully call `fork(2)` to tell us
   // about its new child.
-  const volatile template_process_t* tstruct =
+  const volatile template_process_t *tstruct =
       &(rw_region->as<mcmini_shm_file>()->tpt);
 
-  signal_tracker::set_sem((sem_t*)&tstruct->mcmini_process_sem);
-  if (sem_post((sem_t*)&tstruct->libmcmini_sem) != 0) {
+  signal_tracker::set_sem((sem_t *)&tstruct->mcmini_process_sem);
+  if (sem_post((sem_t *)&tstruct->libmcmini_sem) != 0) {
     throw process_source::process_creation_exception(
         "The template process (" +
         std::to_string(this->template_process_handle->get_pid()) +
         ") was not synchronized with correctly: " +
         std::string(strerror(errno)));
   }
-  int rc = signal_tracker::sig_semwait((sem_t*)&tstruct->mcmini_process_sem);
+  int rc = signal_tracker::sig_semwait((sem_t *)&tstruct->mcmini_process_sem);
   if (rc != 0) {
     throw process_source::process_creation_exception(
         "The template process (" +
@@ -110,7 +110,7 @@ std::unique_ptr<process> fork_process_source::make_new_process() {
         ") was not synchronized with correctly: " +
         std::string(strerror(errno)));
   }
-
+  signal_tracker::set_sem(nullptr);
   if (signal_tracker::instance().try_consume_signal(SIGCHLD)) {
     // TODO: At this point, McMini may have multiple child processes.
     // Calling `prctl(PR_SETSUBREAPER)` in the branch processes means
@@ -151,16 +151,15 @@ void multithreaded_fork_process_source::make_new_template_process() {
   // Here we need, in addition, to wait for the template thread
   // to have heard back from all userspace threads before declaing the template
   // process is ready.
-  shared_memory_region* rw_region =
+  shared_memory_region *rw_region =
       xpc_resources::get_instance().get_rw_region();
-  const volatile template_process_t* tstruct =
+  const volatile template_process_t *tstruct =
       &(rw_region->as<mcmini_shm_file>()->tpt);
 
-  signal_tracker::set_sem((sem_t*)&tstruct->mcmini_process_sem);
-
+  signal_tracker::set_sem((sem_t *)&tstruct->mcmini_process_sem);
   fork_process_source::make_new_template_process();
   log_verbose(mfps) << "Waiting for the template thread to stabilize";
-  int rc = signal_tracker::sig_semwait((sem_t*)&tstruct->mcmini_process_sem);
+  int rc = signal_tracker::sig_semwait((sem_t *)&tstruct->mcmini_process_sem);
   if (rc != 0) {
     throw process_source::process_creation_exception(
         "The template process (" +
@@ -168,4 +167,5 @@ void multithreaded_fork_process_source::make_new_template_process() {
         ") was not synchronized with correctly: " +
         std::string(strerror(errno)));
   }
+  signal_tracker::set_sem(nullptr);
 }

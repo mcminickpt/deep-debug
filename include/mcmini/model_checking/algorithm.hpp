@@ -1,7 +1,5 @@
 #pragma once
 
-#include <functional>
-
 #include "mcmini/coordinator/coordinator.hpp"
 #include "mcmini/model/exception.hpp"
 #include "mcmini/model/program.hpp"
@@ -15,24 +13,37 @@ namespace model_checking {
  * the correctness of a program modeled under McMini.
  */
 class algorithm {
- public:
+public:
+  enum class exploration_policy : uint { round_robin, smallest_first };
+
+  struct context {
+    virtual const model::program &get_model() const = 0;
+    virtual std::vector<const model::transition *>
+    linearize_lowest_first() const = 0;
+    virtual std::vector<const model::transition *>
+    linearize_optimal() const = 0;
+    std::vector<const model::transition *> linearize_trace(bool optimal) const {
+      return optimal ? linearize_optimal() : linearize_lowest_first();
+    }
+  };
+
   struct callbacks {
-   public:
-    callbacks() = default;
-    std::function<void(const coordinator &, const stats &)> crash;
-    std::function<void(const coordinator &, const stats &)> deadlock;
-    std::function<void(const coordinator &, const stats &)> data_race;
-    std::function<void(const coordinator &, const stats &)> unknown_error;
-    std::function<void(const coordinator &, const stats &)> trace_completed;
-    std::function<void(const coordinator &, const stats &,
-                       const real_world::process::termination_error &)>
-        abnormal_termination;
-    std::function<void(const coordinator &, const stats &,
-                       const real_world::process::nonzero_exit_code_error &)>
-        nonzero_exit_code;
-    std::function<void(const coordinator &, const stats &,
-                       const model::undefined_behavior_exception &)>
-        undefined_behavior;
+    virtual void crash(const context &, const stats &) const {}
+    virtual void deadlock(const context &, const stats &) const {}
+    virtual void data_race(const context &, const stats &) const {}
+    virtual void trace_completed(const context &, const stats &) const {}
+
+    virtual void
+    abnormal_termination(const context &, const stats &,
+                         const real_world::process::termination_error &) const {
+    }
+    virtual void nonzero_exit_code(
+        const context &, const stats &,
+        const real_world::process::nonzero_exit_code_error &) const {}
+
+    virtual void
+    undefined_behavior(const context &, const stats &,
+                       const model::undefined_behavior_exception &) const {}
   };
 
   /**
@@ -72,4 +83,4 @@ class algorithm {
   }
 };
 
-};  // namespace model_checking
+}; // namespace model_checking

@@ -77,7 +77,7 @@
  * aforementioned synchronization.
  */
 class coordinator {
- public:
+public:
   /**
    * @brief Constructs a new coordinator which synchronizes processes.
    *
@@ -90,6 +90,12 @@ class coordinator {
    * @param process_source a process source which can repeatedly produce
    * processes starting at state `initial_state`. The coordinator will
    * repeatedly create new processes from this source part of its exploration.
+   * @param assumes_linear_program_flow whether each thread executes a sequence
+   * of transitions that does not depend on the ordering of the execution of
+   * other thread operations. In other words, each thread can only become
+   * disabled, but will execute a fixed sequence of operations. This is the case
+   * in codes without control flow dependent on the interaction of other
+   * threads.
    * @invariant: A _critical_ invariant is that _process_source_ create new
    * processed that are modeled by _initial_state_. McMini model-checking
    * algorithms rely _solely_ on the model to make determinations about how to
@@ -101,7 +107,8 @@ class coordinator {
    */
   coordinator(model::program &&initial_state,
               model::transition_registry runtime_transition_mapping,
-              std::unique_ptr<real_world::process_source> &&process_source);
+              std::unique_ptr<real_world::process_source> &&process_source,
+              bool assumes_linear_program_flow = false);
   ~coordinator() = default;
 
   const model::program &get_current_program_model() const {
@@ -163,7 +170,7 @@ class coordinator {
    */
   void execute_runner(real_world::process::runner_id_t id);
 
- private:
+private:
   logging::logger logger = logging::logger("coord");
   model::program current_program_model;
   model::transition_registry runtime_transition_mapping;
@@ -171,7 +178,10 @@ class coordinator {
   std::unique_ptr<real_world::process_source> process_source;
   std::unordered_map<real_world::remote_address<void>, model::state::objid_t>
       system_address_mapping;
+  std::vector<std::vector<const model::transition *>> transition_cache;
+  bool assumes_linear_program_flow = false;
 
+private:
   void assign_new_process_handle() {
     // NOTE: This is INTENTIONALLY split into two separate statements, i.e.
     // assiging `nullptr` and THEN calling `force_new_process()`. We want to

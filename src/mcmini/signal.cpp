@@ -36,6 +36,7 @@ const std::unordered_map<signo_t, const char *> sig_to_str = {
 };
 
 sem_t *signal_tracker::current_sem = nullptr;
+logging::logger signal_logger("signal_tracker");
 
 void signal_tracker_sig_handler(int sig, siginfo_t *, void *) {
   // TODO: If multiple SIGCHLDs are received before the main thread has a chance
@@ -50,6 +51,7 @@ void signal_tracker_sig_handler(int sig, siginfo_t *, void *) {
     // Reset the global value BEFORE posting. We assume only TWO threads inside
     // of McMini at this point.
     sem_post(set_sem);
+    signal_tracker::instance().set_sem(nullptr);
   }
 }
 
@@ -135,7 +137,7 @@ static void handle_incoming_signals(sem_t *rendez_vous) {
     // """
     int sig;
     sigwait(&all_signals, &sig);
-    std::cout << "Received signal: " << sig_to_str.at(sig) << std::endl;
+    log_debug(signal_logger) << "Received signal: " << sig_to_str.at(sig);
     if (signal_tracker::is_bad_signal(sig)) {
       std::terminate();
     } else if (sig == SIGINT) {

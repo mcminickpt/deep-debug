@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define MCMINI_LOG_MINIMUM_LEVEL (MCMINI_LOG_DEBUG)
+#define MCMINI_LOG_MINIMUM_LEVEL (MCMINI_LOG_DISABLE)
 
 enum log_level {
   MCMINI_LOG_VERBOSE,

@@ -11,49 +11,47 @@
 #include "mcmini/log/severity_level.hpp"
 #include "mcmini/model/program.hpp"
 
-#define log_severity(logger, severity) \
+#define log_severity(logger, severity)                                         \
   logger.make_stream(__FILE__, __LINE__) << severity
-#define log_very_verbose(logger) \
+#define log_very_verbose(logger)                                               \
   log_severity(logger, logging::severity_level::very_verbose)
-#define log_verbose(logger) \
+#define log_verbose(logger)                                                    \
   log_severity(logger, logging::severity_level::verbose)
 #define log_debug(logger) log_severity(logger, logging::severity_level::debug)
 #define log_info(logger) log_severity(logger, logging::severity_level::info)
-#define log_unexpected(logger) \
+#define log_unexpected(logger)                                                 \
   log_severity(logger, logging::severity_level::unexpected)
 #define log_error(logger) log_severity(logger, logging::severity_level::error)
-#define log_critical(logger) \
+#define log_critical(logger)                                                   \
   log_severity(logger, logging::severity_level::critical)
 #define log_abort(logger) log_severity(logger, logging::severity_level::abort)
 
 namespace logging {
 class logger {
- public:
+public:
   logger() = default;
   logger(const std::string &subsystem) : subsystem(subsystem) {}
 
- public:
-  template <typename T>
-  void set_instance(T *instance) {
+public:
+  template <typename T> void set_instance(T *instance) {
     std::stringstream strm;
     strm << "0x" << std::hex << reinterpret_cast<uint64_t>(instance);
     this->instance = strm.str();
   }
 
- public:
+public:
   struct stream {
-   public:
+  public:
     ~stream() { flush(); }
-    template <typename T>
-    stream &operator<<(const T &value) {
+    template <typename T> stream &operator<<(const T &value) {
       ostream << value;
       return *this;
     }
 
-    template <typename T>
-    stream &operator<<(const std::unordered_set<T> &set) {
+    template <typename T> stream &operator<<(const std::unordered_set<T> &set) {
       ostream << "[";
-      for (const T &t : set) ostream << t << ", ";
+      for (const T &t : set)
+        ostream << t << ", ";
       ostream << "]";
       return *this;
     }
@@ -72,7 +70,7 @@ class logger {
       return *this;
     }
 
-   private:
+  private:
     stream &operator=(stream &&) = default;
     stream(stream &&) = default;
     explicit stream(logger *log, const char *file = __FILE__,
@@ -85,7 +83,7 @@ class logger {
       };
     }
 
-   private:
+  private:
     logger *log;
     const char *file;
     int line;
@@ -93,13 +91,12 @@ class logger {
     severity_level current_severity = severity_level::info;
     std::stringstream ostream;
 
-   private:
+  private:
     friend class logger;
   };
 
- public:
-  template <typename T>
-  stream operator<<(const T &item) {
+public:
+  template <typename T> stream operator<<(const T &item) {
     return make_stream(__FILE__, __LINE__);
   }
 
@@ -107,18 +104,18 @@ class logger {
     return logging::logger::stream(this, file, line);
   }
 
- public:
+public:
   inline void log_raw(const std::string &message, severity_level severity,
                       const char *file = __FILE__, int line = __LINE__) {
     log_control::instance().log_raw(instance, subsystem, message, severity,
                                     file, line);
   }
 
- private:
+private:
   std::string instance;
   std::string subsystem;
 
- private:
+private:
   friend struct stream;
 };
-}  // namespace logging
+} // namespace logging

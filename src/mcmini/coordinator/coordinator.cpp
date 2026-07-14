@@ -25,14 +25,28 @@ using namespace real_world;
 coordinator::coordinator(
     model::program &&initial_state,
     model::transition_registry runtime_transition_mapping,
-    std::unique_ptr<real_world::process_source> &&process_source)
+    std::unique_ptr<real_world::process_source> &&process_source,
+    bool assumes_linear_program_flow)
     : current_program_model(std::move(initial_state)),
       runtime_transition_mapping(std::move(runtime_transition_mapping)),
-      process_source(std::move(process_source)) {
-  this->assign_new_process_handle();
+      process_source(std::move(process_source)),
+      assumes_linear_program_flow(assumes_linear_program_flow) {
+  if (!assumes_linear_program_flow) this->assign_new_process_handle();
 }
 
 void coordinator::execute_runner(process::runner_id_t runner_id) {
+  if (assumes_linear_program_flow) {
+    // this->current_program_model.get_trace().count(runner_id);
+
+    // TODO: Check if in transition cache --> otherwise fallback
+    // and create a new process before
+
+    // else {
+    //   // If not in the cache, create a new process and restart
+    //   this->return_to_depth(this->current_program_model.get_trace().count());
+    // }
+  }
+
   if (!current_process_handle) {
     throw real_world::process::execution_error(
         "Failed to execute runner with id \"" + std::to_string(runner_id) +

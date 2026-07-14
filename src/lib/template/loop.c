@@ -75,7 +75,6 @@ int rt_sigqueueinfo(pid_t tgid, int sig, siginfo_t *info) {
 
 void mc_template_receive_sigchld(int sig, siginfo_t *info, void *) {
     assert(global_model_checker_pid != NO_DEFINED_MCMINI_PID);
-    printf("signalling!!\n");
     fsync(STDOUT_FILENO);
     int status;
     bool signal_mcmini = false;
@@ -92,12 +91,11 @@ void mc_template_receive_sigchld(int sig, siginfo_t *info, void *) {
     }
     else if (WIFSIGNALED(status)) {
       int signo = WTERMSIG(status);
-      printf("signaled %d", status);
+      // printf("signaled %d", status);
       fsync(STDOUT_FILENO);
       signal_mcmini = is_bad_signal(signo);
     }
     if (signal_mcmini) {
-      printf("signalling McMini!!\n");
       fsync(STDOUT_FILENO);
       // TODO: We can use `sigqueue(3)` to pass the exit status of
       // the child to the McMini process

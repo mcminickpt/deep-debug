@@ -14,7 +14,9 @@ void transition_sequence::consume_into_subsequence(uint32_t depth) {
   // effect.
   if (depth <= contents.size()) {
     extensions::delete_all(contents.begin() + depth, contents.end());
-    contents.erase(contents.begin() + depth, contents.end());
+    contents.resize(depth);
+    // Per-thread depths change
+    per_runner_depth.clear();
   }
 }
 

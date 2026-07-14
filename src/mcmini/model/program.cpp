@@ -151,12 +151,10 @@ bool program::is_in_deadlock() const {
   // probably still want to show a bug if other userspace threads manage to get
   // into a deadlock even while the main thread could exit, so we don't treat
   // that case specially.
-  bool all_exited = true;
-  for (const auto &pair : this->get_pending_transitions()) {
+  for (const auto &pair : this->get_pending_transitions())
     if (!this->state_seq.get_state_of_runner(pair.first)->has_exited())
-      all_exited = false;
-  }
-  return !all_exited;
+      return true;  // All blocked and at least one hasn't exited
+  return false;
 }
 
 std::ostream &program::dump_state(std::ostream &os) const {

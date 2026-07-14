@@ -221,9 +221,9 @@ struct stack_item final {
     return backtrack_thread;
   }
 
-  clock_vector get_clock_vector() const { return this->cv; }
-  const std::array<runner_item, MAX_TOTAL_THREADS_IN_PROGRAM>
-      &get_per_runner_clocks() const {
+  const clock_vector &get_clock_vector() const { return this->cv; }
+  const std::array<runner_item, MAX_TOTAL_THREADS_IN_PROGRAM> &
+  get_per_runner_clocks() const {
     return this->per_runner_clocks;
   }
   runner_id_t get_first_enabled_runner() const {
@@ -232,6 +232,9 @@ struct stack_item final {
       r = std::min(r, p);
     }
     return r;
+  }
+  const bool is_enabled(runner_id_t rid) {
+    return this->enabled_runners.count(rid) > 0;
   }
   const std::unordered_set<runner_id_t> &get_enabled_runners() const {
     return this->enabled_runners;
