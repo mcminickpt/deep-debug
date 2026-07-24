@@ -14,6 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 # Project configuration
 option(BUILD_TESTS OFF)
 option(VERBOSE_TESTING OFF)
+option(MCMINI_LIBMCMINI_TSAN "Build libmcmini.so itself with -fsanitize=thread" OFF)
 set(MCMINI_DIR "${CMAKE_SOURCE_DIR}")
 set(MCMINI_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 set(MCMINI_CMAKE_MODULE_DIR "${CMAKE_SOURCE_DIR}/cmake")
@@ -90,6 +91,13 @@ set(LIBMCMINI_EXTRA_COMPILER_DEFINITIONS MC_SHARED_LIBRARY=1 DMTCP=1 LOGGING_ROO
 # -lm -> math library
 # -ldl -> dlsym etc.
 set(LIBMCMINI_EXTRA_LINK_FLAGS -lrt -pthread -lm -ldl)
+
+# libmcmini.so is normally uninstrumented even when the target links libtsan
+# (see PLAN.txt); MCMINI_LIBMCMINI_TSAN is an experiment to instrument it too.
+if(MCMINI_LIBMCMINI_TSAN)
+  list(APPEND LIBMCMINI_EXTRA_COMPILER_FLAGS -fsanitize=thread)
+  list(APPEND LIBMCMINI_EXTRA_LINK_FLAGS -fsanitize=thread)
+endif()
 
 # libmcmini.so -> the dylib which is loaded
 add_library(libmcmini SHARED "${LIBMCMINI_C_SRC}")
