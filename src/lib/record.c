@@ -183,6 +183,24 @@ enum libmcmini_mode get_current_mode() {
       return EXTERNAL_THREAD;
     }
   }
+  enum libmcmini_mode raw_mode = atomic_load(&libmcmini_mode);
+  // mc_is_current_thread_tsan_internal() is only ever needed to distinguish
+  // TSan's internal thread in the four modes below (the same four every
+  // wrapper function's own switch groups together for this purpose) --
+  // never during PRE_DMTCP_INIT, PRE_CHECKPOINT_THREAD, RECORD, or
+  // PRE_CHECKPOINT. Its first call per thread leaks an fd (see
+  // tsan_support.c), and calling it outside these four modes means that
+  // leaked fd is open at checkpoint time, so DMTCP must checkpoint/restore
+  // a /proc/<pid>/task/<tid>/status path whose pid/tid cannot exist after
+  // restart -- template_thread() then hangs waiting for a
+  // restart-completion signal that can never arrive.
+  bool tsan_internal_check_applies =
+      raw_mode == TARGET_BRANCH || raw_mode == TARGET_BRANCH_AFTER_RESTART ||
+      raw_mode == DMTCP_RESTART_INTO_BRANCH ||
+      raw_mode == DMTCP_RESTART_INTO_TEMPLATE;
+  if (!tsan_internal_check_applies) {
+    return raw_mode;
+  }
   // ThreadSanitizer's own internal background thread (present only when the
   // target is TSan-instrumented) can likewise call into libmcmini.so's
   // overridden functions for its own purposes, on a thread that is not part
@@ -190,7 +208,7 @@ enum libmcmini_mode get_current_mode() {
   if (mc_is_current_thread_tsan_internal()) {
     return EXTERNAL_THREAD;
   }
-  return atomic_load(&libmcmini_mode);
+  return raw_mode;
 }
 void set_current_mode(enum libmcmini_mode new_mode) {
   atomic_store(&libmcmini_mode, new_mode);
