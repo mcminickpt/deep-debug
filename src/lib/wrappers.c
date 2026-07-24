@@ -160,7 +160,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       return libpthread_mutex_init(mutex, attr);
     }
     case RECORD:
@@ -240,7 +240,7 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       return libpthread_mutex_lock(mutex);
     }
     case RECORD:
@@ -332,7 +332,7 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       return libpthread_mutex_unlock(mutex);
     }
     case RECORD:
@@ -532,7 +532,7 @@ void *mc_thread_routine_wrapper(void *arg) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       fprintf(stderr,
       "In `PRE_DMTCP_INIT` mode, `mc_pthread_create` always directly calls DMTCP."
       "Reaching this point would be an error.\n");
@@ -779,7 +779,7 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       libpthread_sem_wait(&wrapped_arg->mc_pthread_create_binary_sem);
       return rc;
     }
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       log_warn(
           "The checkpoint thread is creating another thread. Calls from this "
           "thread should probably be ignored by the McMini library, as "
@@ -885,7 +885,7 @@ int mc_pthread_join(pthread_t t, void **rv) {
       assert(0);
     }
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case EXTERNAL_THREAD: {
       return libdmtcp_pthread_join(t, rv);
     }
     case RECORD:

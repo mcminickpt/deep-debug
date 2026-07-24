@@ -60,14 +60,19 @@ extern "C" {
  * behave as in `PRE_DMTCP_INIT`. For `pthread_create`, the call is _only_
  * forwarded into DMTCP instead -- the checkpoint thread is NOT recorded.
  *
- * CHECKPOINT_THREAD:
- *   In this mode, DMTCP has created the checkpoint thread. The checkpoint
- * thread should not interact with McMini in any way. But the two interact
- * because the functions `libmcmini.so` overrides are used by `dmtcp`
- * extensively (e.g. `sem_wait()`). This mode, special to the library when
- * executing from the perspective of the checkpoint thread, indicates that DMTCP
- * has called directly into McMini. In most cases, this probably means
- * forwarding the call to DMTCP's wrapper functions of to `libpthread.so`.
+ * EXTERNAL_THREAD:
+ *   In this mode, the calling thread is not one of the target program's own
+ * threads: it is external "plumbing" that happens to call into functions
+ * `libmcmini.so` overrides (e.g. `sem_wait()`), even though it should not
+ * otherwise interact with McMini at all. `get_current_mode()` reports this
+ * mode for such a thread regardless of the global recording/restart state.
+ * Two cases are known to hit this: (1) DMTCP's own checkpoint thread, which
+ * uses `libmcmini.so`'s overridden functions extensively as part of its own
+ * bookkeeping, and (2) ThreadSanitizer's internal background thread (present
+ * when the target is TSan-instrumented), which can likewise call into these
+ * same overridden functions for its own purposes. In either case, wrapper
+ * functions should simply forward the call, typically to DMTCP's own wrapper
+ * or to `libpthread.so`.
  *
  * RECORD:
  *   In this mode, `libmcmini.so` performs a light-weight recording of the
@@ -124,7 +129,7 @@ extern "C" {
 enum libmcmini_mode {
   PRE_DMTCP_INIT,
   PRE_CHECKPOINT_THREAD,
-  CHECKPOINT_THREAD,
+  EXTERNAL_THREAD,
   RECORD,
   PRE_CHECKPOINT,
   DMTCP_RESTART_INTO_BRANCH,
