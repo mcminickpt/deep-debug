@@ -3,6 +3,7 @@
 #include "mcmini/spy/checkpointing/rec_list.h"
 #include "mcmini/spy/checkpointing/objects.h"
 #include "mcmini/spy/checkpointing/transitions.h"
+#include "mcmini/spy/checkpointing/tsan_support.h"
 #include "mcmini/spy/intercept/interception.h"
 
 #include <stdio.h>
@@ -179,8 +180,15 @@ enum libmcmini_mode get_current_mode() {
   // stored is BEFORE the checkpoint thread has executed DMTCP code.
   if (atomic_load(&libmcmini_has_recorded_checkpoint_thread)) {
     if (is_checkpoint_thread()) {
-      return CHECKPOINT_THREAD;
+      return EXTERNAL_THREAD;
     }
+  }
+  // ThreadSanitizer's own internal background thread (present only when the
+  // target is TSan-instrumented) can likewise call into libmcmini.so's
+  // overridden functions for its own purposes, on a thread that is not part
+  // of the target program. See EXTERNAL_THREAD's definition in record.h.
+  if (mc_is_current_thread_tsan_internal()) {
+    return EXTERNAL_THREAD;
   }
   return atomic_load(&libmcmini_mode);
 }
