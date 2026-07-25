@@ -160,6 +160,9 @@ void set_current_mode(enum libmcmini_mode);
 extern pthread_t ckpt_pthread_descriptor;
 extern volatile atomic_bool libmcmini_has_recorded_checkpoint_thread;
 bool is_checkpoint_thread(void);
+void record_checkpoint_thread(void);
+void mark_ckpt_window_candidate(int virtual_tid);
+void resolve_ckpt_window_candidate_if_pending(void);
 
 typedef struct visible_object visible_object;
 typedef struct rec_list rec_list;

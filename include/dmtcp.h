@@ -502,11 +502,15 @@ int dmtcp_protected_environ_fd(void);
 pid_t dmtcp_pid_real_to_virtual(pid_t realPid) __attribute((weak));
 pid_t dmtcp_pid_virtual_to_real(pid_t virtualPid) __attribute((weak));
 
-// Returns 1 if virtual_tid names TSAN's own background thread, else 0.
-int dmtcp_is_tsan_background_thread(int virtual_tid) __attribute((weak));
-#define dmtcp_is_tsan_background_thread(virtual_tid) \
-  (dmtcp_is_tsan_background_thread ? \
-   dmtcp_is_tsan_background_thread(virtual_tid) : 0)
+
+// Returns the virtual tid of TSAN's own background thread, 0 if there is
+// none (including when not running under DMTCP or not a TSAN target), or
+// -1 if that hasn't been determined yet (e.g. briefly after a restart,
+// before TSAN respawns its background thread).
+int dmtcp_tsan_background_thread_virtual_tid() __attribute((weak));
+#define dmtcp_tsan_background_thread_virtual_tid() \
+  (dmtcp_tsan_background_thread_virtual_tid ? \
+   dmtcp_tsan_background_thread_virtual_tid() : 0)
 
 // Tells DMTCP that this restart is one-shot: the checkpoint thread should
 // not resume its usual sleep-checkpoint-resume loop (i.e., it should not
