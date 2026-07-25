@@ -3,11 +3,13 @@
 #include <dmtcp.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -645,10 +647,64 @@ void record_checkpoint_thread(void) {
   set_current_mode(RECORD);
 }
 
+// Set (per-thread) by dmtcp_create_checkpoint_thread_wrapper() below, and
+// resolved lazily by resolve_ckpt_window_candidate_if_pending() (called from
+// get_current_mode()) on this thread's own first wrapped call.
+static MCMINI_THREAD_LOCAL bool is_ckpt_window_candidate = false;
+static MCMINI_THREAD_LOCAL int ckpt_window_candidate_virtual_tid;
+
+// Both the real checkpoint thread and TSAN's nested background-thread spawn
+// (see dmtcp_create_checkpoint_thread_wrapper()'s comment) reach the same
+// wrapper, and neither can tell, at creation time, which one it is. We can't
+// resolve that here by calling dmtcp_tsan_background_thread_virtual_tid()
+// and waiting: classification requires DMTCP's endCkptThreadCreationWindow(),
+// which does not run until DMTCP's createCkptThread() sees its own
+// pthread_create() call return -- which itself requires this thread to be
+// registered with TSan, which happens only once this thread runs its real
+// routine (below). Blocking here to wait for classification would therefore
+// deadlock.
+//
+// So instead: mark this thread as a candidate and return immediately,
+// letting it proceed into its real routine. Classification then happens
+// lazily, on this same thread's first subsequent wrapped call (necessarily
+// after TSan has registered it, so no longer deadlock-prone).
+void mark_ckpt_window_candidate(int virtual_tid) {
+  ckpt_window_candidate_virtual_tid = virtual_tid;
+  is_ckpt_window_candidate = true;
+}
+
+void resolve_ckpt_window_candidate_if_pending(void) {
+  if (!is_ckpt_window_candidate) return;
+  is_ckpt_window_candidate = false;
+
+  int tsan_bg_virtual_tid = dmtcp_tsan_background_thread_virtual_tid();
+  while (tsan_bg_virtual_tid == -1) {
+    sched_yield();
+    tsan_bg_virtual_tid = dmtcp_tsan_background_thread_virtual_tid();
+  }
+  if (tsan_bg_virtual_tid != ckpt_window_candidate_virtual_tid) {
+    record_checkpoint_thread();
+  }
+  // else: this is TSAN's own background thread (tsan_bg_virtual_tid ==
+  // ckpt_window_candidate_virtual_tid), not the checkpoint thread -- no
+  // checkpoint-thread bookkeeping needed.
+}
+
 void *dmtcp_create_checkpoint_thread_wrapper(void *arg) {
-  record_checkpoint_thread();
   struct mc_thread_routine_arg *unwrapped_arg = arg;
+
+  // Unblock mc_pthread_create()'s caller immediately; see
+  // mark_ckpt_window_candidate()'s comment for why classification can't
+  // happen here, before running the real routine.
+  //
+  // Trade-off: this leaves a window, from here until this thread's first
+  // subsequent wrapped call, during which ckpt_pthread_descriptor is not
+  // yet set (previously guaranteed set by the time createCkptThread()
+  // returned).
   libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
+
+  mark_ckpt_window_candidate((int)syscall(SYS_gettid));
+
   void *rv = unwrapped_arg->routine(unwrapped_arg->arg);
   free(arg);
   return rv;
@@ -684,18 +740,12 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     case PRE_CHECKPOINT_THREAD: {
       pthread_once(&main_thread_once, &record_main_thread);
 
-      // We must be able to at runtime determine which thread is the checkpoint
-      // thread. Here we record the `pthread_t` struct assigned to the
-      // checkpoint thread and later compare it with the value returned by
-      // `pthread_create()`.
-      //
-      // NOTE: The semaphore is necessary here as the child thread in this
-      // instance will be the checkpoint thread and will hence call into DMTCP.
-      // Since the goal of detecting if the caller is the checkpoint thread
-      // inside of wrappers is to prevent the checkpoint thread from interacting
-      // with McMini wrappers, and since we write the checkpoint thread's
-      // `pthread_t` into a globally accessible location, we must synchronize
-      // with the checkpoint thread.
+      // This call may be the real checkpoint thread's own creation, or a
+      // nested spawn of TSAN's background thread happening as a side effect
+      // of it (see dmtcp_create_checkpoint_thread_wrapper()'s own comment).
+      // Either way, the new thread figures out which one it is for itself,
+      // once running; we just need to synchronize enough to know it has
+      // started before returning here.
       struct mc_thread_routine_arg *wrapped_arg =
           malloc(sizeof(struct mc_thread_routine_arg));
       wrapped_arg->arg = arg;

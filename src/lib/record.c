@@ -171,6 +171,8 @@ bool is_in_restart_mode(void) {
 }
 
 enum libmcmini_mode get_current_mode() {
+  resolve_ckpt_window_candidate_if_pending();
+
   // INVARIANT (imposed by the code in `mc_pthread_create()`):
   // The checkpoint thread is guaranteed to reach the line
   // "is_checkpoint_thread()", because the only time in which the atomic is
