@@ -545,6 +545,14 @@ static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
       } else {
         set_current_mode(DMTCP_RESTART_INTO_BRANCH);
         log_debug("`MCMINI_TEMPLATE_LOOP` was not set at restart-time\n");
+
+        // A DMTCP_RESTART_INTO_BRANCH process explores exactly one trace,
+        // then this process is discarded -- it will never legitimately be
+        // asked to checkpoint again. Left alone, the checkpoint thread would
+        // resume its normal sleep-checkpoint-resume loop and block forever
+        // waiting for a checkpoint request from this restart's (one-shot,
+        // otherwise idle) coordinator.
+        dmtcp_skip_post_restart_checkpoint_loop();
       }
 
       // During record mode, the shared memory
