@@ -45,12 +45,12 @@ runner_id_t search_pthread_map(pthread_t t) {
     pthread_map_t *cur = head;
     while (cur) {
         if (pthread_equal(cur->thread, t)) {
-            return cur->value;
+            break;
         }
         cur = cur->next;
     }
     pthread_rwlock_unlock(&pthread_map_lock);
-    return RID_INVALID;
+    return cur == NULL ? RID_INVALID : cur->value;
 }
 
 // Returns the given thread's own exit_permission_sem (see pthread_map_t),
