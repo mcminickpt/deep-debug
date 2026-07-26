@@ -18,6 +18,11 @@
 typedef struct pthread_map {
     pthread_t thread;
     runner_id_t value;
+    // Posted by whichever thread eventually calls pthread_join() on this
+    // one (mc_pthread_join()'s TARGET_BRANCH case), waited on by this
+    // thread itself before it may really terminate (mc_exit_thread_in_child()).
+    // See the two functions for the full rationale.
+    sem_t exit_permission_sem;
     struct pthread_map *next;
 } pthread_map_t;
 
@@ -29,6 +34,7 @@ void insert_pthread_map(pthread_t t, runner_id_t v) {
     pthread_map_t *n = malloc(sizeof *n);
     n->thread = t;
     n->value = v;
+    libpthread_sem_init(&n->exit_permission_sem, 0, 0);
     n->next = head;
     head = n;
     pthread_rwlock_unlock(&pthread_map_lock);
@@ -45,6 +51,21 @@ runner_id_t search_pthread_map(pthread_t t) {
     }
     pthread_rwlock_unlock(&pthread_map_lock);
     return RID_INVALID;
+}
+
+// Returns the given thread's own exit_permission_sem (see pthread_map_t),
+// or NULL if the thread is not (yet) registered.
+sem_t *find_exit_permission_sem(pthread_t t) {
+  pthread_rwlock_rdlock(&pthread_map_lock);
+  pthread_map_t *cur = head;
+  while (cur) {
+    if (pthread_equal(cur->thread, t)) {
+      break;
+    }
+    cur = cur->next;
+  }
+  pthread_rwlock_unlock(&pthread_map_lock);
+  return cur == NULL ? NULL : &cur->exit_permission_sem;
 }
 
 
@@ -335,7 +356,16 @@ void mc_exit_thread_in_child(void) {
   thread_get_mailbox()->type = THREAD_EXIT_TYPE;
   thread_wake_scheduler_and_wait();
   thread_awake_scheduler_for_thread_finish_transition();
-  thread_block_indefinitely();
+
+  // Wait for whichever thread eventually calls pthread_join() on this one
+  // (see mc_pthread_join()'s TARGET_BRANCH case) to grant permission before
+  // this thread is allowed to really terminate. This keeps this thread's
+  // pthread_t/tid valid for exactly as long as a real, unjoined POSIX
+  // thread's would be -- no longer -- rather than parking it forever
+  // regardless of whether anyone ever joins it.
+  sem_t *exit_permission = find_exit_permission_sem(pthread_self());
+  assert(exit_permission != NULL);
+  libpthread_sem_wait(exit_permission);
 }
 
 void mc_exit_main_thread_in_child(void) {
@@ -772,7 +802,16 @@ int mc_pthread_join(pthread_t t, void **rv) {
       memcpy_v(thread_get_mailbox()->cnts, &rid, sizeof(runner_id_t));
       thread_get_mailbox()->type = THREAD_JOIN_TYPE;
       thread_wake_scheduler_and_wait();
-      return 0;
+
+      // Grant the target thread permission to really terminate now that
+      // it's been joined (see mc_exit_thread_in_child()), then perform a
+      // genuine join, so its OS thread actually dies -- and *rv is
+      // genuinely populated -- before we return, instead of only
+      // simulating success at the model level.
+      sem_t *exit_permission = find_exit_permission_sem(t);
+      assert(exit_permission != NULL);
+      libpthread_sem_post(exit_permission);
+      return libpthread_pthread_join(t, rv);
     }
     default: {
       libc_abort();
