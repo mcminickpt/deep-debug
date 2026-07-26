@@ -508,6 +508,16 @@ int dmtcp_is_tsan_background_thread(int virtual_tid) __attribute((weak));
   (dmtcp_is_tsan_background_thread ? \
    dmtcp_is_tsan_background_thread(virtual_tid) : 0)
 
+// Tells DMTCP that this restart is one-shot: the checkpoint thread should
+// not resume its usual sleep-checkpoint-resume loop (i.e., it should not
+// wait for a future checkpoint request), since no such request is ever
+// coming. Must be called on the checkpoint thread itself, from a
+// DMTCP_EVENT_RESTART hook (before that event's plugin dispatch returns).
+void dmtcp_skip_post_restart_checkpoint_loop(void) __attribute((weak));
+#define dmtcp_skip_post_restart_checkpoint_loop() \
+  (dmtcp_skip_post_restart_checkpoint_loop ? \
+   dmtcp_skip_post_restart_checkpoint_loop() : (void)0)
+
 // McMini helpers: translate pids only when running under DMTCP.
 // (DMTCP plugin API v4 renamed dmtcp_{real_to_virtual,virtual_to_real}_pid to
 // dmtcp_pid_{real_to_virtual,virtual_to_real}.)
