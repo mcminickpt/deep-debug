@@ -11,6 +11,29 @@ static const char *log_level_strs[] = {
   "VERBOSE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "DISABLE"
 };
 
+// mcmini_log() is called concurrently, unsynchronized, by any thread. Its
+// call to localtime() below can trigger glibc's lazy timezone-database
+// initialization (tzset_internal), which is not safe to race across
+// threads on its first call. Constructors run once, before main(), with
+// only a single thread, so calling tzset() here forces that lazy init to
+// happen safely ahead of any concurrent mcmini_log() call.
+__attribute__((constructor)) static void mcmini_log_init_tz(void) {
+  tzset();
+}
+
+// TSan's public annotation API (see <sanitizer/tsan_interface.h>), used
+// below to tell TSan about log_mut's happens-before edge. libmcmini.so
+// itself is normally uninstrumented, and log_mut is locked/unlocked via
+// libpthread_mutex_lock/unlock, which resolve straight to libpthread's own
+// symbols (bypassing TSan's interceptor entirely -- see
+// mc_load_intercepted_pthread_functions() in interception.c) -- so without
+// this, a real, correctly-held lock is still invisible to TSan, and it
+// reports a false race on glibc's internal tzset_internal() state instead.
+// Declared weak (same idiom as dmtcp_mcmini_plugin_is_loaded() in main.c),
+// so this is a no-op when the process has no TSan runtime loaded at all.
+extern void __tsan_acquire(void *addr) __attribute__((weak));
+extern void __tsan_release(void *addr) __attribute__((weak));
+
 typedef struct log_record {
   int level;
   int line;
@@ -36,6 +59,15 @@ void mcmini_log(int level, const char *file, int line, const char *fmt, ...) {
   if (level < global_log_level) {
       return;
   }
+  // glibc's tzset_internal() (invoked by localtime_r() below on every call,
+  // not just the first) is not safe to run concurrently from multiple
+  // threads even when TZ never changes -- it races on its own internal TZ
+  // database cache. mcmini_log() is called unsynchronized from any thread,
+  // so serialize the whole body with our own lock.
+  static pthread_mutex_t log_mut = PTHREAD_MUTEX_INITIALIZER;
+  libpthread_mutex_lock(&log_mut);
+  if (__tsan_acquire) __tsan_acquire(&log_mut);
+
   log_record rc;
   time_t t = time(NULL);
   rc.format = fmt;
@@ -43,7 +75,9 @@ void mcmini_log(int level, const char *file, int line, const char *fmt, ...) {
   rc.line = line;
   rc.level = level;
   rc.target = stdout;
-  rc.time = localtime(&t);
+  struct tm tm_buf;
+  localtime_r(&t, &tm_buf);
+  rc.time = &tm_buf;
   va_start(rc.var_args, fmt);
   char buf[20];
   buf[strftime(buf, sizeof(buf), "%H:%M:%S", rc.time)] = '\0';
@@ -57,4 +91,7 @@ void mcmini_log(int level, const char *file, int line, const char *fmt, ...) {
   fprintf(rc.target, "\n");
   fflush(rc.target);
   va_end(rc.var_args);
+
+  if (__tsan_release) __tsan_release(&log_mut);
+  libpthread_mutex_unlock(&log_mut);
 }
