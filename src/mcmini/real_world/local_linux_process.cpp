@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 #include <atomic>
 #include <cstring>
@@ -52,6 +53,29 @@ local_linux_process::~local_linux_process() {
       } else {
         log_error(process_logger) << "Error: " << strerror(errno);
       }
+    } else {
+      // This death is expected and already fully handled (we just reaped
+      // it above): consume the SIGCHLD it generated, so it doesn't linger in
+      // signal_tracker's counter. Otherwise the next process this class
+      // creates (see coordinator::return_to_depth()/assign_new_process_handle(),
+      // which destroys the old handle immediately before creating a new
+      // one) would see that leftover count on its own first execute_runner()
+      // call and wrongly conclude *it* had just died, even though it's
+      // still alive and simply hasn't responded yet.
+      signal_tracker::instance().try_consume_signal(SIGCHLD);
+
+      // The process we just killed may itself have left behind other
+      // now-orphaned descendants (e.g. its own private DMTCP coordinator,
+      // spawned by `dmtcp_restart --new-coordinator`) that die/reparent to
+      // us -- as the PR_SET_CHILD_SUBREAPER subreaper -- around the same
+      // time, generating their own SIGCHLDs. signal_tracker's counter isn't
+      // tied to a specific pid, so drain every zombie that's already
+      // reapable right now (non-blocking: this must never wait on a
+      // descendant that hasn't died yet) and consume one signal per reap,
+      // so none of them linger to be misattributed later either.
+      while (waitpid(-1, &status, WNOHANG) > 0) {
+        signal_tracker::instance().try_consume_signal(SIGCHLD);
+      }
     }
   }
 }
@@ -83,40 +107,44 @@ volatile runner_mailbox *local_linux_process::execute_runner(runner_id_t id) {
   // TODO: The template process will also send a SIGCHLD if it dies
   // unexpectedly. Because we don't expect the template process to die, this is
   // OK for now, but should be handled in the future.
-  errno = 0;
-  signal_tracker::sig_semwait((sem_t *)&rmb->model_side_sem);
-  if (signal_tracker::instance().try_consume_signal(SIGCHLD)) {
-    // TODO: Get the true failure status from the template process via
-    // e.g. shared memory.
-    throw process::termination_error(SIGTERM, id,
-                                     "Process terminated abnormally.");
-    // // TODO: Double check that this
-    // // is the correct process that sent
-    // // the SIGCHILD using WNOHANG.
-
-    // // `PR_SET_CHILD_SUBREAPER` enables us to wait on
-    // // this grandchild.
-    // int status;
-    // int rc = waitpid(this->pid, &status, 0);
-    // if (rc == -1) {
-    //   throw process::execution_error(
-    //       "Error attempting to determine the failure causing the child
-    //       process " "to abnormally exit (or possibly an internal error of
-    //       McMini)." + std::string(strerror(errno)));
-    // } else {
-    //   if (WIFEXITED(status)) {
-    //     int exit_code = WEXITSTATUS(status);
-    //     throw process::nonzero_exit_code_error(
-    //         exit_code, "Process terminated with a non-zero exit code.");
-    //   } else if (WIFSIGNALED(status)) {
-    //     int signo = WTERMSIG(status);
-    //     throw process::termination_error(signo,
-    //                                      "Process terminated abnormally.");
-    //   } else {
-    //     throw process::execution_error(
-    //         "SIGSTOP/SIGCONT in branch processes is not yet supported.");
-    //   }
-    // }
+  while (true) {
+    errno = 0;
+    signal_tracker::sig_semwait((sem_t *)&rmb->model_side_sem);
+    if (!signal_tracker::instance().try_consume_signal(SIGCHLD)) {
+      break;
+    }
+    // signal_tracker's SIGCHLD count is process-wide, not tied to a pid, so
+    // a pending count doesn't necessarily mean *this->pid* is the one that
+    // died -- some other descendant (e.g. a previous branch's own private
+    // DMTCP coordinator) may have generated it instead. Confirm with a
+    // non-blocking waitpid() specifically on this->pid (PR_SET_CHILD_SUBREAPER,
+    // set in target::prepare_mcmini_targets(), lets us wait on it even though
+    // it isn't a direct child): if it hasn't actually changed state, this
+    // SIGCHLD wasn't ours, so just resume waiting instead of misreporting a
+    // termination that didn't happen.
+    int status;
+    int rc = waitpid(this->pid, &status, WNOHANG);
+    if (rc == 0) {
+      continue;
+    }
+    if (rc == -1) {
+      throw process::execution_error(
+          "Error attempting to determine the failure causing the child "
+          "process to abnormally exit (or possibly an internal error of "
+          "McMini): " + std::string(strerror(errno)));
+    } else if (WIFEXITED(status)) {
+      throw process::nonzero_exit_code_error(
+          WEXITSTATUS(status), id,
+          "The program exited with code " + std::to_string(WEXITSTATUS(status)));
+    } else if (WIFSIGNALED(status)) {
+      throw process::termination_error(
+          WTERMSIG(status), id,
+          "Process terminated abnormally by signal " +
+              std::to_string(WTERMSIG(status)));
+    } else {
+      throw process::execution_error(
+          "SIGSTOP/SIGCONT in branch processes is not yet supported.");
+    }
   }
   return rmb;
 }
