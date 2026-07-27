@@ -22,6 +22,28 @@ target_link_libraries(producer-consumer-park PUBLIC -pthread)
 target_link_libraries(exit-stress PUBLIC -pthread)
 target_link_libraries(cv-producer-consumer PUBLIC -pthread)
 
+# TSan-instrumented variant of producer-consumer, for testing McMini's
+# DMTCP-restart + TSan integration (see CLAUDE.md, "DMTCP-restart under
+# ThreadSanitizer"). Needs -Wl,--wrap=pthread_join plus
+# src/lib/pthread_join_wrap.c compiled directly into this binary -- see
+# that file's header comment for why it can't live in libmcmini.so itself.
+add_executable(producer-consumer-tsan producer-consumer.c
+                                      ../lib/pthread_join_wrap.c)
+target_compile_options(producer-consumer-tsan PUBLIC -fsanitize=thread)
+target_link_options(producer-consumer-tsan PUBLIC -fsanitize=thread
+                                                   -Wl,--wrap=pthread_join)
+target_link_libraries(producer-consumer-tsan PUBLIC -pthread libmcmini)
+
+# do_recording() (src/mcmini/mcmini.cpp) resolves the plugin path as
+# getcwd()/libmcmini.so, so mcmini must be invoked from the directory holding
+# libmcmini.so -- i.e. CMAKE_BINARY_DIR, not this target's own output
+# directory. Keep a copy there in sync on every build, so it can't silently
+# go stale relative to libmcmini.so.
+add_custom_command(TARGET producer-consumer-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:producer-consumer-tsan>
+          ${CMAKE_BINARY_DIR}/producer-consumer-tsan)
+
 # Same as producer-consumer-safe-tsan, but worker threads terminate via an
 # explicit pthread_exit() call instead of returning -- deliberately WITHOUT
 # a pthread_exit wrap yet, to test whether that path has the same
@@ -86,3 +108,20 @@ add_custom_command(TARGET exit-stress-noop-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:exit-stress-noop-tsan>
           ${CMAKE_BINARY_DIR}/exit-stress-noop-tsan)
+
+# TSan-instrumented variant of cv-producer-consumer, for testing McMini's
+# DMTCP-restart + TSan integration against condition variables specifically
+# (see doc/glibc-cond-var-desync.txt). Same build recipe as
+# producer-consumer-tsan above.
+add_executable(cv-producer-consumer-tsan cv-producer-consumer.c
+                                         ../lib/pthread_join_wrap.c)
+target_compile_options(cv-producer-consumer-tsan PUBLIC -fsanitize=thread)
+target_link_options(cv-producer-consumer-tsan PUBLIC -fsanitize=thread
+                                                      -Wl,--wrap=pthread_join)
+target_link_libraries(cv-producer-consumer-tsan PUBLIC -pthread libmcmini)
+
+# See the producer-consumer-tsan POST_BUILD step above for why this is needed.
+add_custom_command(TARGET cv-producer-consumer-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:cv-producer-consumer-tsan>
+          ${CMAKE_BINARY_DIR}/cv-producer-consumer-tsan)
