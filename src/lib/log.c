@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <unistd.h>
 #include "dmtcp.h"
 
 static int global_log_level = MCMINI_LOG_MINIMUM_LEVEL;
@@ -55,16 +56,39 @@ void mcmini_log_toggle(bool enable) {
     mcmini_log_set_level(MCMINI_LOG_DISABLE);
 }
 
+// glibc's tzset_internal() (invoked by localtime_r() below on every call,
+// not just the first) is not safe to run concurrently from multiple threads
+// even when TZ never changes -- it races on its own internal TZ database
+// cache. mcmini_log() is called unsynchronized from any thread, so
+// serialize the whole body with this lock.
+//
+// multithreaded_fork()'s process-duplicating step is a raw _Fork(), chosen
+// specifically to skip the work a real fork() would do -- including running
+// any registered pthread_atfork() handlers. That means this lock gets no
+// fork-safety net: if some other thread (most plausibly the template
+// thread, which logs constantly) holds it at the exact instant _Fork()
+// snapshots memory for a new branch, every thread in that branch that later
+// calls mcmini_log() deadlocks on it forever -- the true owner's
+// continuation isn't part of this child's process at all, so nothing can
+// ever unlock it. See doc/log-mutex-fork-desync.txt.
+static pthread_mutex_t log_mut = PTHREAD_MUTEX_INITIALIZER;
+
+void mcmini_log_reset_after_fork(void) {
+  // Must use the bypass handle, not the plain pthread_mutex_init(): that
+  // symbol is libmcmini's own interposed mc_pthread_mutex_init(), which
+  // dispatches on get_current_mode() and (in TARGET_BRANCH_AFTER_RESTART/
+  // DMTCP_RESTART_INTO_BRANCH modes) asserts this thread already has a
+  // valid tid_self via thread_get_mailbox() -- not yet true this early,
+  // right after _Fork(), before restart_child_threads_fast() runs. log_mut
+  // is a purely internal implementation detail, never meant to be
+  // model-checked in the first place.
+  libpthread_mutex_init(&log_mut, NULL);
+}
+
 void mcmini_log(int level, const char *file, int line, const char *fmt, ...) {
   if (level < global_log_level) {
       return;
   }
-  // glibc's tzset_internal() (invoked by localtime_r() below on every call,
-  // not just the first) is not safe to run concurrently from multiple
-  // threads even when TZ never changes -- it races on its own internal TZ
-  // database cache. mcmini_log() is called unsynchronized from any thread,
-  // so serialize the whole body with our own lock.
-  static pthread_mutex_t log_mut = PTHREAD_MUTEX_INITIALIZER;
   libpthread_mutex_lock(&log_mut);
   if (__tsan_acquire) __tsan_acquire(&log_mut);
 

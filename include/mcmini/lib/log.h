@@ -30,3 +30,9 @@ enum log_level {
 void mcmini_log_set_level(int level);
 void mcmini_log_toggle(bool enable);
 void mcmini_log(int level, const char *file, int line, const char *fmt, ...);
+
+// Force log_mut back to the unlocked state. Call this exactly once, as the
+// sole surviving thread in a freshly-_Fork()-ed child, before any other
+// thread is recreated in it. See the comment above log_mut in log.c for why
+// this is needed.
+void mcmini_log_reset_after_fork(void);

@@ -72,6 +72,7 @@
 #include "dmtcp.h"
 
 #ifdef MC_SHARED_LIBRARY
+#include "mcmini/lib/log.h"
 #include "mcmini/real_world/process/template_process.h"
 #include "mcmini/spy/checkpointing/record.h"
 #include "mcmini/spy/intercept/interception.h"
@@ -401,6 +402,15 @@ int clone(int (*fn)(void *arg), void *child_stack, int flags, void *arg,
 #endif
   initialized = 0;  // Reset for next call to multithreaded_fork()
   if (childpid == 0) { // child process
+    // _Fork() deliberately skips pthread_atfork() handlers, so any lock
+    // some other (non-surviving) thread held at the instant of forking is
+    // now permanently, unrecoverably stuck locked in this child -- nothing
+    // here ever calls the matching unlock. mcmini_log()'s own serialization
+    // mutex is a confirmed instance of this (see doc/log-mutex-fork-desync.txt);
+    // reset it here, while this is still the only thread alive in the
+    // child, before restart_child_threads() below recreates any others that
+    // might call it.
+    mcmini_log_reset_after_fork();
     restart_child_threads(num_threads);
   }
   return childpid;

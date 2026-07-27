@@ -272,6 +272,21 @@ pid_t fast_multithreaded_fork(void) {
     if (__tsan_switch_to_fiber != NULL) {
       __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
     }
+    // _Fork() (unlike a real fork()) deliberately skips pthread_atfork()
+    // handlers, so mcmini_log()'s own log_mut can be left stranded locked
+    // if some other thread held it at the exact instant _Fork() snapshotted
+    // memory for this branch -- see doc/log-mutex-fork-desync.txt. This
+    // reset MUST run here, before restart_child_threads_fast() recreates
+    // any other thread, while this is still the only OS thread alive in
+    // the child, so it can never race a concurrent lock/unlock attempt.
+    //
+    // NOTE: an earlier version of this fix was applied to
+    // src/common/multithreaded_fork.c's multithreaded_fork() instead --
+    // that function turned out to be dead code (superseded by this one,
+    // fast_multithreaded_fork(), per commit 74679cf), so the fix was never
+    // actually active on the real --multithreaded-fork path. This is the
+    // correct location.
+    mcmini_log_reset_after_fork();
     restart_child_threads_fast();
   }
   return childpid;
