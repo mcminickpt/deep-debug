@@ -208,6 +208,10 @@ void classic_dpor::verify_using(coordinator &coordinator,
         if (callbacks.abnormal_termination)
           callbacks.abnormal_termination(coordinator, model_checking_stats, te);
         return;
+      } catch (const real_world::process::nonzero_exit_code_error &nzec) {
+        if (callbacks.nonzero_exit_code)
+          callbacks.nonzero_exit_code(coordinator, model_checking_stats, nzec);
+        return;
       }
       log_debug(dpor_logger) << "Finished backtracking to depth `"
                              << (dpor_stack.size() - 1) << "`";
