@@ -157,7 +157,8 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
         // FIXME: We assume that this is a normal mutex. For other mutex
         // types, we'd need to behave differently
         visible_object vo = {
-            .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
+            .type = MUTEX, .location = mutex,
+            .mut_state = {.status = UNINITIALIZED, .owner = RID_INVALID}};
         mutex_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
@@ -165,7 +166,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
       int rc = libpthread_mutex_init(mutex, attr);
       if (rc == 0) {  // Init
         libpthread_mutex_lock(&rec_list_lock);
-        mutex_record->vo.mut_state = UNLOCKED;
+        mutex_record->vo.mut_state.status = UNLOCKED;
         libpthread_mutex_unlock(&rec_list_lock);
       }
       return rc;
@@ -234,7 +235,8 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
       rec_list *mutex_record = find_object_record_mode(mutex);
       if (mutex_record == NULL) {
         visible_object vo = {
-            .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
+            .type = MUTEX, .location = mutex,
+            .mut_state = {.status = UNINITIALIZED, .owner = RID_INVALID}};
         mutex_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
@@ -252,7 +254,12 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
         int rc = libpthread_mutex_timedlock(mutex, &time);
         if (rc == 0) {  // Lock succeeded
           libpthread_mutex_lock(&rec_list_lock);
-          mutex_record->vo.mut_state = LOCKED;
+          // Record the owner too: a checkpoint can land while this thread is
+          // mid pthread_cond_wait(), still modeled as the mutex's holder
+          // until the enqueue transition runs (condition_variable_enqueue_
+          // thread::modify() requires mutex->is_locked_by(executor)).
+          mutex_record->vo.mut_state.status = LOCKED;
+          mutex_record->vo.mut_state.owner = tid_self;
           libpthread_mutex_unlock(&rec_list_lock);
           return rc;
         } else if (rc == ETIMEDOUT) {  // If the lock failed.
@@ -328,7 +335,8 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
       int rc = libpthread_mutex_unlock(mutex);
       if (rc == 0) {  // Unlock succeeded
         libpthread_mutex_lock(&rec_list_lock);
-        mutex_record->vo.mut_state = UNLOCKED;
+        mutex_record->vo.mut_state.status = UNLOCKED;
+        mutex_record->vo.mut_state.owner = RID_INVALID;
         libpthread_mutex_unlock(&rec_list_lock);
       }
       return rc;

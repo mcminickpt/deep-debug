@@ -52,11 +52,18 @@ visible_object_state* translate_recorded_object_to_model(
   // fine too.
   switch (recorded_object.type) {
     case MUTEX: {
-      auto mutex_state =
-          static_cast<objects::mutex::state>(recorded_object.mut_state);
+      auto mutex_state = static_cast<objects::mutex::state>(
+          recorded_object.mut_state.status);
       pthread_mutex_t* mutex_location =
           (pthread_mutex_t*)recorded_object.location;
-      return new objects::mutex(mutex_state, mutex_location);
+      // Restore the owner too: a checkpoint can land while a thread is mid
+      // pthread_cond_wait(), still modeled as the mutex's holder until the
+      // enqueue transition runs (condition_variable_enqueue_thread::modify()
+      // requires mutex->is_locked_by(executor)). Without this, owner is
+      // left default-constructed/unset, so that check always fails and the
+      // restored state deadlocks immediately.
+      return new objects::mutex(mutex_state, mutex_location,
+                                recorded_object.mut_state.owner);
     }
     case CONDITION_VARIABLE: {
       // Create the condition variable model object with full state information
