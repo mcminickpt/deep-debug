@@ -142,14 +142,23 @@ void found_abnormal_termination(
   for (const auto& t : program_model.get_trace()) {
     ss << "thread " << t->get_executor() << ": " << t->to_string() << "\n";
   }
+  // `ub.culprit` may not have a pending transition in the model's current
+  // view: this callback can also fire for a termination_error raised while
+  // `coordinator::return_to_depth()` is replaying already-recorded history
+  // against a freshly restarted process, and by the replay's target depth
+  // the culprit thread may already have exited in the model.
   const transition* terminator =
       program_model.get_pending_transition_for(ub.culprit);
-  ss << "thread " << terminator->get_executor() << ": "
-     << terminator->to_string() << "\n";
+  if (terminator != nullptr) {
+    ss << "thread " << terminator->get_executor() << ": "
+       << terminator->to_string() << "\n";
+  } else {
+    ss << "thread " << ub.culprit << ": (no longer pending)\n";
+  }
 
   ss << "\nNEXT THREAD OPERATIONS\n";
   for (const auto& tpair : program_model.get_pending_transitions()) {
-    if (tpair.first == terminator->get_executor()) {
+    if (terminator != nullptr && tpair.first == terminator->get_executor()) {
       ss << "thread " << tpair.first << ": executing"
          << "\n";
     } else {
