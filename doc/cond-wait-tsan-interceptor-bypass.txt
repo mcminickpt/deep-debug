@@ -1,0 +1,72 @@
+pthread_cond_wait bypasses libmcmini under DMTCP+TSan
+=======================================================
+
+Symptom
+-------
+A DMTCP-restart-from-checkpoint of a TSan-instrumented target hangs
+forever as soon as any thread is genuinely blocked in pthread_cond_wait()
+at checkpoint time. mcmini's own trace output never even reaches
+"INITIAL STATE" for that thread; it just waits on a mailbox message that
+never arrives.
+
+Root cause
+----------
+Under DMTCP, libtsan.so loads ahead of libmcmini.so (the reverse of
+classic mode), so the target's own calls to the public pthread_cond_wait()
+symbol resolve to TSan's interceptor first, via the PLT/GOT -- confirmed
+empirically by reading the resolved GOT entry out of /proc/pid/mem.
+
+This is the same load-order problem pthread_join already had (see
+pthread_join_wrap.c), but pthread_cond_wait can't be fixed the same way
+sem_wait/pthread_mutex_lock/pthread_cond_signal/broadcast are handled:
+those TSan interceptors do their own bookkeeping and then delegate the
+actual operation to whatever's next in the interposition chain (landing
+on libmcmini's mc_* wrapper, since it's next after libtsan under DMTCP).
+pthread_cond_wait must atomically release the mutex and suspend the
+thread, then atomically reacquire the mutex on wakeup; TSan implements
+that whole sequence itself, inside its own runtime, rather than risk a
+race window from splitting the atomicity across an interposed call. So
+the target's pthread_cond_wait() calls never reach mc_pthread_cond_wait()
+at all -- the thread genuinely, permanently blocks inside TSan's own real,
+untimed wait, with nothing left to wake it (see glibc-cond-var-desync.txt
+for why the earlier CV desync fix removed the only thing that could have).
+
+Fix
+---
+-Wl,--wrap=pthread_cond_wait, applied when linking the TARGET (not
+libmcmini.so), rewrites the target's own pthread_cond_wait() calls to
+__wrap_pthread_cond_wait() at link time -- before the dynamic linker (and
+hence TSan's interceptor) is ever involved. See pthread_cond_wait_wrap.c.
+Unlike pthread_join, there's no "sometimes a real wait is still needed"
+case: mc_pthread_cond_wait() is already fully self-contained in every
+libmcmini_mode, so the wrapper forwards unconditionally with no
+__real_pthread_cond_wait() fallback.
+
+Verification
+------------
+Confirmed via GOT inspection that pthread_mutex_lock, pthread_mutex_unlock,
+sem_post, sem_wait, and pthread_cond_wait all resolve to libtsan.so
+directly with no exception -- the asymmetry is in TSan's internal
+delegation behavior per function, not in symbol resolution.
+
+Confirmed live: before the fix, restarting cv-producer-consumer-tsan from
+a checkpoint taken mid-consumer-cond_wait hung indefinitely (trace log
+truncated right after "waiting for them to get into a consistent state").
+After the fix, the same restart completes promptly, and the consumer's
+cond_wait shows up as a genuine, modeled NEXT THREAD OPERATIONS entry
+instead of an invisible black-box call.
+
+Follow-on issue (separate from this fix)
+-----------------------------------------
+That same verification run surfaced a second, previously-unreachable bug:
+once the consumer's cond_wait is actually visible to the model, the
+restart reports an immediate DEADLOCK. The reconstructed state shows the
+mutex still "locked" by the consumer and the condition_variable still at
+cv_initialized (never advanced to cv_waiting), so neither the producer's
+pthread_mutex_lock nor the consumer's own resume-from-wait transition
+(condition_variables_wait.hpp's modify()) can ever become enabled. This
+looks like a bug in how the checkpoint/restart path reconstructs CV
+waiter-queue state (the CV_PREWAITING/CV_WAITING bookkeeping described in
+Cond_Var_Readme.md) rather than anything to do with the TSan-bypass fix
+above, since this code path was never reachable before this fix landed.
+Tracked as a separate, follow-on investigation.
