@@ -239,8 +239,16 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
       }
       libpthread_mutex_unlock(&rec_list_lock);
 
-      struct timespec time = {.tv_sec = 2};
       while (1) {
+        // Recompute the deadline every iteration -- see mc_sem_wait()'s
+        // identical pattern in sem-wrappers.c. A hoisted, one-time-computed
+        // {.tv_sec = 2} here would be interpreted as an absolute deadline of
+        // 2 seconds past the epoch, already long past, making every
+        // subsequent call return ETIMEDOUT immediately instead of ever
+        // genuinely blocking.
+        struct timespec time;
+        clock_gettime(CLOCK_REALTIME, &time);
+        time.tv_sec += 2;
         int rc = libpthread_mutex_timedlock(mutex, &time);
         if (rc == 0) {  // Lock succeeded
           libpthread_mutex_lock(&rec_list_lock);
@@ -761,8 +769,14 @@ int mc_pthread_join(pthread_t t, void **rv) {
       assert(thread_record != NULL);
       libpthread_mutex_unlock(&rec_list_lock);
 
-      struct timespec time = {.tv_sec = 2, .tv_nsec = 0};
       while (1) {
+        // Recompute the deadline every iteration -- see mc_sem_wait()'s
+        // identical pattern in sem-wrappers.c and mc_pthread_mutex_lock()
+        // above; a hoisted, one-time {.tv_sec = 2} is an already-past
+        // absolute deadline, not "2 seconds from now".
+        struct timespec time;
+        clock_gettime(CLOCK_REALTIME, &time);
+        time.tv_sec += 2;
         // Use the libtsan-bypassing handle: a direct pthread_timedjoin_np would
         // hit libtsan's interceptor and trip its thread-registry CHECK under
         // DMTCP. See TSAN-McMini-DMTCP.txt.
@@ -945,9 +959,16 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       cond_record->vo.cond_state.count++;
       libpthread_mutex_unlock(&rec_list_lock);
 
-      struct timespec wait_time = {.tv_sec = 2, .tv_nsec = 0};
       int rc;
       while (1) {
+        // Recompute the deadline every iteration -- see mc_sem_wait()'s
+        // identical pattern in sem-wrappers.c; a hoisted, one-time
+        // {.tv_sec = 2} is an already-past absolute deadline, not "2
+        // seconds from now", so every call would return ETIMEDOUT
+        // immediately instead of ever genuinely blocking.
+        struct timespec wait_time;
+        clock_gettime(CLOCK_REALTIME, &wait_time);
+        wait_time.tv_sec += 2;
         rc = libpthread_cond_timedwait(cond, mutex, &wait_time);
         if (rc == 0) {
           // The thread has successfully entered the waiting state.
