@@ -66,11 +66,3 @@ std::unique_ptr<process> dmtcp_process_source::make_new_process() {
   // assert(tstruct->cpid == target_branch_pid);
   return extensions::make_unique<local_linux_process>(target_branch_pid);
 }
-
-dmtcp_process_source::~dmtcp_process_source() {
-  target dmtcp_cleanup(
-      "dmtcp_command",
-      {"-q", "--port", std::to_string(this->coordinator_target.get_port())});
-  dmtcp_cleanup.set_quiet(true);
-  dmtcp_cleanup.launch_and_wait();
-}

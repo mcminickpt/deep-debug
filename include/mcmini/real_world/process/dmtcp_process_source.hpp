@@ -6,7 +6,7 @@
 
 #include "mcmini/defines.h"
 #include "mcmini/forwards.hpp"
-#include "mcmini/real_world/process/dmtcp_coordinator.hpp"
+#include "mcmini/real_world/dmtcp_target.hpp"
 #include "mcmini/real_world/process/local_linux_process.hpp"
 #include "mcmini/real_world/process_source.hpp"
 #include "mcmini/real_world/shm.hpp"
@@ -27,14 +27,12 @@ class dmtcp_process_source : public process_source {
  private:
   std::string ckpt_file;
   dmtcp_target dmtcp_restart_target;
-  dmtcp_coordinator coordinator_target;
 
  private:
   pid_t make_new_branch();
 
  public:
   dmtcp_process_source(const std::string &ckpt_file);
-  virtual ~dmtcp_process_source();
 
  public:
   std::unique_ptr<process> make_new_process() override;
