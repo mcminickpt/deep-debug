@@ -1,0 +1,116 @@
+mcmini_log()'s own mutex frozen locked across multithreaded_fork()
+=============================================================================
+
+This is a third, distinct instance of the general "external state gets
+frozen inconsistent across checkpoint/restart or fork/clone" pattern
+documented in doc/glibc-sem-desync.txt and doc/glibc-cond-var-desync.txt --
+but the mechanism here is plain, ordinary fork-safety, not a glibc-internal
+bookkeeping desync.
+
+Symptom
+--------
+Rare (roughly 1-in-13 to 1-in-25 runs observed), reproducible via repeated
+`mcmini --from-first-checkpoint --multithreaded-fork ./producer-consumer-tsan`
+cycles: every thread in an occasional DPOR branch hangs forever, very early,
+before the branch does any real work. gdb-attaching live to a hung branch
+(see doc/glibc-sem-desync.txt's verification-methodology note for the
+technique) showed all threads blocked in the exact same place:
+
+  mcmini_log() -> libpthread_mutex_lock(&log_mut) -> real glibc mutex lock,
+  blocked in a futex wait.
+
+Reading log_mut's raw memory directly (`x/4xw <address>` in gdb) confirmed
+its lock word was 2 (glibc's "locked, with waiter(s)" encoding) -- a
+genuinely, correctly-locked state from glibc's own point of view, just one
+nobody alive in this process could ever release.
+
+Root cause
+-----------
+`multithreaded_fork()`'s process-duplication step is `_Fork()` (glibc's
+internal, minimal fork primitive), not the public `fork()`. This is
+deliberate -- the surrounding comment says "We want to skip the normal fork
+cleanup of child threads" -- and one of the things `_Fork()` explicitly,
+intentionally skips is running any handler registered via
+`pthread_atfork()`. That is precisely the mechanism a normal `fork()` would
+use to let any lock protecting shared state reset itself safely in the
+child.
+
+`mcmini_log()` serializes its whole body (including a glibc `localtime_r()`
+call that is not safe to race) with a single, ordinary, static
+`pthread_mutex_t log_mut`, locked and unlocked by whichever thread is
+logging at the time -- including, most plausibly, the template thread
+itself, which logs extremely frequently (every "Restarting into template",
+"The template process created child with pid ...", etc. debug line seen
+throughout this project's own logs). If _Fork() happens to snapshot memory
+for a new branch at the exact instant some thread holds log_mut, that
+thread's matching unlock() is now stranded in a different process (or a
+different, non-recreated context) that this specific branch has no
+relationship to. Every thread in the new branch that later calls
+mcmini_log() -- which is essentially every thread, given how pervasively
+this codebase logs -- deadlocks on it forever.
+
+The fix
+--------
+`mcmini_log_reset_after_fork()` (src/lib/log.c) force-reinitializes
+`log_mut` via the libpthread bypass handle. It is called from
+`fast_multithreaded_fork()` (src/lib/dmtcp-callback.c -- see "Correction"
+below), in the `childpid == 0` branch, immediately after `_Fork()` returns
+and before `restart_child_threads_fast()` recreates any other thread --
+i.e. while this is still the only OS thread alive in the child, so the
+reset can never race a concurrent lock/unlock attempt.
+
+Files and functions:
+
+  include/mcmini/lib/log.h
+    - Declares mcmini_log_reset_after_fork().
+
+  src/lib/log.c
+    - log_mut moved from a mcmini_log()-local static to file scope, so
+      mcmini_log_reset_after_fork() can reach the same variable.
+    - mcmini_log_reset_after_fork() added, using libpthread_mutex_init()
+      (the bypass handle) -- see "Correction" below for why this matters.
+
+  src/lib/dmtcp-callback.c
+    - fast_multithreaded_fork() calls mcmini_log_reset_after_fork() right
+      after _Fork() returns 0 (child) and the fiber switch, before
+      restart_child_threads_fast().
+
+Correction (found while investigating a later, unrelated report)
+------------------------------------------------------------------
+The original version of this fix wired mcmini_log_reset_after_fork() into
+src/common/multithreaded_fork.c's multithreaded_fork() -- which turned out
+to be dead code: superseded by fast_multithreaded_fork() in
+src/lib/dmtcp-callback.c (commit 74679cf, "Use fast_multithreaded_fork()"),
+the only function template/loop.c's real, active fork loop ever calls. The
+fix was therefore never active on the real `--multithreaded-fork` path at
+all -- confirmed by grepping every caller of mcmini_log_reset_after_fork()
+and finding only the dead-code call site. This explains the "one hang
+reproduced with the fix already applied" discrepancy below: the "fix"
+wasn't actually running, so every observed hang (before AND supposedly
+after) shared the same, never-actually-changed root cause. The 140
+hang-free runs were most likely an unlucky-for-testing lucky streak at the
+true, still-untouched ~1-in-13-to-25 rate, not evidence the fix worked.
+
+Moving the call to the real fast_multithreaded_fork() immediately exposed a
+second, previously-dormant bug in mcmini_log_reset_after_fork() itself: it
+called the plain, public pthread_mutex_init() -- which, since libmcmini.so
+intercepts that very symbol, recursively re-enters McMini's own
+mc_pthread_mutex_init() wrapper for what should be a purely internal,
+invisible mutex reset. That wrapper's restart-mode dispatch asserts the
+calling thread already has a valid tid_self via thread_get_mailbox() --
+not yet true this early, immediately after _Fork(), before
+restart_child_threads_fast() has run -- so the very first real exercise of
+the (now correctly wired-up) reset crashed with `Assertion 'tid_self !=
+RID_INVALID' failed` on the first restart attempt. Fixed by switching to
+libpthread_mutex_init() (the same bypass handle log_mut's own lock/unlock
+already use), which never re-enters libmcmini's wrapper machinery.
+
+Verification after the correction
+------------------------------------
+40 consecutive fresh-checkpoint `producer-consumer-tsan --multithreaded-fork`
+restart cycles completed with zero hangs and zero crashes, using the
+corrected call site and the corrected libpthread_mutex_init() reset. This
+is now believed to be the first time this fix has actually been exercised
+on the real code path. Given the original ~1-in-13-to-25 rate, 40 clean
+runs is a smaller sample than the original (misleading) 140-run claim --
+worth another, larger batch if this area is revisited again.
