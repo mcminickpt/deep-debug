@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
@@ -18,6 +19,25 @@
 #include "mcmini/mcmini.h"
 
 volatile void *global_shm_start = NULL;
+
+// Weak: __tsan_acquire resolves to non-NULL only when libtsan.so is loaded
+// in this process (i.e. the target is TSan-instrumented); __wrap_pthread_join
+// resolves to non-NULL only if the target itself was linked with
+// -Wl,--wrap=pthread_join (see src/lib/pthread_join_wrap.c). Without that
+// flag, a DMTCP-resurrected thread's pthread_join() can hang forever under
+// TSan -- see TSAN-pthread-join.md -- so warn as early as possible if a
+// TSan target is missing it.
+extern void __tsan_acquire(void *addr) __attribute__((weak));
+extern int __wrap_pthread_join(pthread_t thread, void **retval)
+    __attribute__((weak));
+
+__attribute__((constructor)) static void warn_if_tsan_target_missing_wrap(void) {
+  if (__tsan_acquire != NULL && __wrap_pthread_join == NULL) {
+    fprintf(stderr,
+            "WARNING: TSAN target not compiled with --wrap.  Potential hang "
+            "during pthread_join\n");
+  }
+}
 
 void mc_allocate_shared_memory_region(const char *shm_name) {
   int fd = shm_open(shm_name, O_RDWR, S_IRUSR | S_IWUSR);
