@@ -106,14 +106,18 @@ add_custom_command(TARGET exit-stress-noop-tsan POST_BUILD
           ${CMAKE_BINARY_DIR}/exit-stress-noop-tsan)
 
 # TSan-instrumented variant of cv-producer-consumer, for testing McMini's
-# DMTCP-restart + TSan integration against condition variables specifically
-# (see doc/glibc-cond-var-desync.txt). Same build recipe as
-# producer-consumer-tsan above.
+# DMTCP-restart + TSan integration against condition variables (see
+# doc/glibc-cond-var-desync.txt). Same recipe as producer-consumer-tsan
+# above, plus -Wl,--wrap=pthread_cond_wait + pthread_cond_wait_wrap.c --
+# see that file's header comment for why it's needed.
 add_executable(cv-producer-consumer-tsan cv-producer-consumer.c
-                                         ../lib/pthread_join_wrap.c)
+                                         ../lib/pthread_join_wrap.c
+                                         ../lib/pthread_cond_wait_wrap.c)
 target_compile_options(cv-producer-consumer-tsan PUBLIC -fsanitize=thread)
-target_link_options(cv-producer-consumer-tsan PUBLIC -fsanitize=thread
-                                                      -Wl,--wrap=pthread_join)
+target_link_options(cv-producer-consumer-tsan PUBLIC
+  -fsanitize=thread
+  -Wl,--wrap=pthread_join
+  -Wl,--wrap=pthread_cond_wait)
 target_link_libraries(cv-producer-consumer-tsan PUBLIC -pthread libmcmini)
 
 # See the producer-consumer-tsan POST_BUILD step above for why this is needed.
