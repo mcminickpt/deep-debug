@@ -197,7 +197,18 @@ void classic_dpor::verify_using(coordinator &coordinator,
       // backtracking.
       log_debug(dpor_logger)
           << "Backtracking to depth `" << (dpor_stack.size() - 1) << "`";
-      coordinator.return_to_depth(dpor_stack.size() - 1);
+      try {
+        coordinator.return_to_depth(dpor_stack.size() - 1);
+      } catch (const real_world::process::termination_error &te) {
+        // The process spawned to replay history up to this depth (see
+        // `coordinator::return_to_depth()`) died before the replay
+        // finished. Report it the same way a termination during forward
+        // exploration is reported, rather than letting it escape
+        // unhandled all the way out of `verify_using()`.
+        if (callbacks.abnormal_termination)
+          callbacks.abnormal_termination(coordinator, model_checking_stats, te);
+        return;
+      }
       log_debug(dpor_logger) << "Finished backtracking to depth `"
                              << (dpor_stack.size() - 1) << "`";
       model_checking_stats.trace_id++;
