@@ -369,8 +369,8 @@ static void *template_thread(void *unused) {
     for (rec_list *entry = head_record_mode; entry != NULL;
          entry = entry->next) {
       if (entry->vo.type == MUTEX) {
-        log_verbose("Writing mutex entry %p (state %d)\n", entry->vo.location,
-               entry->vo.mut_state);
+        log_verbose("Writing mutex entry %p (state %d, owner %d)\n", entry->vo.location,
+               entry->vo.mut_state.status, entry->vo.mut_state.owner);
       } else if (entry->vo.type == THREAD) {
         log_verbose("Writing thread entry %p (id %d, status: %d)\n",
                (void *)entry->vo.thrd_state.pthread_desc,

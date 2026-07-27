@@ -19,11 +19,20 @@ typedef enum visible_object_type {
   CV_WAITERS_QUEUE
 } visible_object_type;
 
-typedef enum mutex_state {
+typedef enum mutex_status {
   UNINITIALIZED,
   UNLOCKED,
   LOCKED,
   DESTROYED
+} mutex_status;
+
+// The thread holding the mutex while LOCKED, so a checkpoint taken mid
+// pthread_cond_wait() (mutex still modeled as LOCKED until the enqueue
+// transition runs -- see condition_variable_enqueue_thread::modify()) can
+// be reconstructed with the correct owner instead of undefined data.
+typedef struct mutex_state {
+  mutex_status status;
+  runner_id_t owner;
 } mutex_state;
 
 typedef enum thread_status {
