@@ -419,7 +419,14 @@ MCMINI_NO_RETURN void mc_transparent_exit(int status) {
       volatile runner_mailbox *mb = thread_get_mailbox();
       mb->type = PROCESS_EXIT_TYPE;
       memcpy_v(mb->cnts, &status, sizeof(status));
-      thread_await_scheduler();
+      // Unlike every other wrapper's TARGET_BRANCH* case, this used to call
+      // the wait-only thread_await_scheduler(), which never posts
+      // model_side_sem. That's harmless for a thread that fell through from
+      // DMTCP_RESTART_INTO_BRANCH/TEMPLATE above (thread_handle_after_dmtcp_restart()
+      // already posted it), but a thread already in TARGET_BRANCH_AFTER_RESTART
+      // (e.g. main(), calling exit() for the first time since restart) jumps
+      // straight here and hangs the coordinator's execute_runner() forever.
+      thread_wake_scheduler_and_wait();
 
       // After "exiting", don't actually exit yet:
       // the model checker will prevent the process
@@ -427,7 +434,7 @@ MCMINI_NO_RETURN void mc_transparent_exit(int status) {
       // branch as "useless" since at this point
       mb->type = PROCESS_EXIT_TYPE;
       memcpy_v(mb->cnts, &status, sizeof(status));
-      thread_await_scheduler();
+      thread_wake_scheduler_and_wait();
     }
     default: {
       libc_exit(status);
