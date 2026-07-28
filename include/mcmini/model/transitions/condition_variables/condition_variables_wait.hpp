@@ -43,14 +43,22 @@ struct condition_variable_wait : public model::transition {
     // Reacquire the mutex: update its state to "locked" with the executor.
     s.add_state_for_obj(mutex_id, new mutex(mutex::locked, m->get_location(), executor));
 
-    // remove the executor from the wake group
-    cv->remove_waiter(executor);
-    
-    const int new_waiting_count = cv->get_policy()->return_wait_queue().size();
+    // Clone the policy rather than mutating cv->get_policy() (via
+    // cv->remove_waiter()) in place -- see condition_variable_enqueue_thread
+    // ::modify()'s identical comment for why: is_enabled_in() runs this same
+    // modify() against a throwaway diff_state just to check the status, and
+    // an in-place mutation on the old, shared policy would escape that
+    // throwaway diff and permanently corrupt the committed state.
+    ConditionVariablePolicy* new_policy = cv->get_policy()->clone();
+    new_policy->wake_thread(executor);
+
+    const int new_waiting_count = new_policy->return_wait_queue().size();
     condition_variable::state new_state = new_waiting_count > 0
                                           ? condition_variable::cv_waiting
                                           : condition_variable::cv_signaled;
-    s.add_state_for_obj(cond_id, new condition_variable(new_state, executor, m->get_location(), new_waiting_count));
+    condition_variable* new_cv = new condition_variable(new_state, executor, m->get_location(), new_waiting_count);
+    new_cv->set_policy(new_policy);
+    s.add_state_for_obj(cond_id, new_cv);
     return status::exists;
   }
   state::objid_t get_id() const { return this->cond_id; }

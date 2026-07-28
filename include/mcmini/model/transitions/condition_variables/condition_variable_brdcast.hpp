@@ -49,23 +49,33 @@ struct condition_variable_broadcast : public model::transition {
       }
     }
 
+    // Clone the policy rather than mutating cv->get_policy() in place -- see
+    // condition_variable_enqueue_thread::modify()'s identical comment for
+    // why: is_enabled_in() runs this same modify() against a throwaway
+    // diff_state just to check the status, and an in-place mutation on the
+    // old, shared policy would escape that throwaway diff and permanently
+    // corrupt the committed state.
+    ConditionVariablePolicy* new_policy = cv->get_policy()->clone();
+
     // Add only CV_WAITING threads to wake groups
     if (!waiting_threads.empty()) {
-      cv->get_policy()->add_to_wake_groups(waiting_threads);
+      new_policy->add_to_wake_groups(waiting_threads);
     }
-    
-    // Make the threads in the wake groups eligible to be woken up by adding them all to broadcast_eligible_threads
-    cv->send_broadcast_message();
-    
+
+    // Make the threads in the wake groups eligible to be woken up by adding
+    // them all to broadcast_eligible_threads
+    new_policy->receive_broadcast_message();
+
     // Update condition variable state
-    const int new_waiting_count = cv->get_policy()->return_wait_queue().size();
+    const int new_waiting_count = new_policy->return_wait_queue().size();
     condition_variable::state new_state = new_waiting_count > 0
                                         ? condition_variable::cv_waiting
                                         : condition_variable::cv_signaled;
-                          
-    s.add_state_for_obj(cond_id, new condition_variable(new_state, executor, 
+    condition_variable* new_cv = new condition_variable(new_state, executor,
                                                         cv->get_mutex(),
-                                                        new_waiting_count));
+                                                        new_waiting_count);
+    new_cv->set_policy(new_policy);
+    s.add_state_for_obj(cond_id, new_cv);
     return status::exists;
   }
   state::objid_t get_id() const { return this->cond_id;}

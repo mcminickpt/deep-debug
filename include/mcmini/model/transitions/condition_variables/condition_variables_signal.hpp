@@ -71,20 +71,32 @@ struct condition_variable_signal : public model::transition {
         waiting_threads.push_back(tid);
       }
     }
-    
+
+    // Clone the policy rather than mutating cv->get_policy() in place -- see
+    // condition_variable_enqueue_thread::modify()'s identical comment for
+    // why: is_enabled_in() runs this same modify() against a throwaway
+    // diff_state just to check the status, and an in-place mutation on the
+    // old, shared policy would escape that throwaway diff and permanently
+    // corrupt the committed state.
+    ConditionVariablePolicy* new_policy = cv->get_policy()->clone();
     // Add only CV_WAITING threads to wake groups
     if (!waiting_threads.empty()) {
-      cv->get_policy()->add_to_wake_groups(waiting_threads);
+      new_policy->add_to_wake_groups(waiting_threads);
     }
 
     // Update the condition variable state
-    const int new_waiting_count = cv->get_policy()->return_wait_queue().size();
+    const int new_waiting_count = new_policy->return_wait_queue().size();
     condition_variable::state new_state = new_waiting_count > 0
                                           ? condition_variable::cv_waiting
                                           : condition_variable::cv_signaled;
-    // tid/mutex left at their sentinel defaults here (RID_INVALID/nullptr):
-    // neither is tracked yet at this point in the file's history.
-    s.add_state_for_obj(cond_id, new condition_variable(new_state, RID_INVALID, nullptr, new_waiting_count));
+    // Also preserve the mutex association: it isn't passed through the
+    // constructor here, so it would otherwise be left uninitialized, making
+    // condition_variable_wait::modify()'s `m->get_location() ==
+    // cv->get_mutex()` check fail forever afterward.
+    condition_variable* new_cv = new condition_variable(new_state, RID_INVALID, nullptr, new_waiting_count);
+    new_cv->set_policy(new_policy);
+    new_cv->set_associated_mutex(cv->get_mutex());
+    s.add_state_for_obj(cond_id, new_cv);
     condition_variable mutable_cv(new_state, RID_INVALID, nullptr, new_waiting_count);
     mutable_cv.check_for_lost_wakeup(true, prev_waiting_count); // Check for lost wakeup if this was a signal
 
