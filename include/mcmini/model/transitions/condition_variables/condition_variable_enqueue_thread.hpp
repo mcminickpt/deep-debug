@@ -40,9 +40,15 @@ struct condition_variable_enqueue_thread : public model::transition{
 
     cv->get_policy()->add_waiter_with_state(executor, CV_WAITING);
     const int new_waiting_count = cv->get_policy()->return_wait_queue().size();
-    
+
     s.add_state_for_obj(cond_id, new condition_variable(condition_variable::cv_waiting, executor, m->get_location(), new_waiting_count));
-    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked));
+    // Preserve the mutex's location: mutex(state) (1-arg) has no default
+    // member initializer for `location` (unlike condition_variable's
+    // policy), so it's left completely uninitialized -- every later
+    // mutex_lock/unlock just faithfully forwards whatever garbage this
+    // leaves behind via ms->get_location(), corrupting the mutex's identity
+    // for the rest of the run.
+    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked, m->get_location()));
     return status::exists;
   }
   state::objid_t get_id() const { return this->cond_id; }

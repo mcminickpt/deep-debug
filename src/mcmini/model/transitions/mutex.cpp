@@ -51,7 +51,8 @@ model::transition* mutex_init_callback(runner_id_t p,
 
   // Locate the corresponding model of this object
   if (!m.contains(remote_mut))
-    m.observe_object(remote_mut, new mutex(mutex::state::uninitialized));
+    m.observe_object(remote_mut,
+                     new mutex(mutex::state::uninitialized, remote_mut));
 
   state::objid_t const mut = m.get_model_of_object(remote_mut);
   return new transitions::mutex_init(p, mut);
