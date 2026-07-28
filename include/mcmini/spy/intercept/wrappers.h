@@ -18,6 +18,11 @@ void thread_awake_scheduler_for_thread_finish_transition(void);
 void thread_handle_after_dmtcp_restart(void);
 volatile runner_mailbox *thread_get_mailbox(void);
 
+// Whether `t` is one of the threads DMTCP resurrected via libc_clone() +
+// setcontext() (see restart_child_threads_fast()), rather than one created
+// normally after restart. Used by mc_pthread_exit() -- see that function.
+bool mc_pthread_is_recreated_thread(pthread_t t);
+
 int mc_pthread_mutex_init(pthread_mutex_t *mutex,
                           const pthread_mutexattr_t *mutexattr);
 int mc_pthread_mutex_lock(pthread_mutex_t *mutex);
@@ -54,3 +59,4 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond);
 void mc_exit_main_thread_in_child(void);
 MCMINI_NO_RETURN void mc_transparent_abort(void);
 MCMINI_NO_RETURN void mc_transparent_exit(int status);
+MCMINI_NO_RETURN void mc_pthread_exit(void *retval);
