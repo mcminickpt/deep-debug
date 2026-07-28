@@ -138,15 +138,10 @@ int main(int argc, char* argv[])
     // Deliberately no pthread_join(): producer/consumer are still alive,
     // parked on `park`, when the process ends.
 
-    // Explicit exit() call, NOT `return 0;`: a plain return makes glibc's
-    // own __libc_start_call_main call __GI_exit -- a glibc-internal alias
-    // resolved at glibc's own compile time, invisible to ANY interposition
-    // technique (--wrap, LD_PRELOAD, or a strong-symbol override). Confirmed
-    // live via gdb: that's exactly what happens on a plain return. Since
-    // main's own restart-quiescence check-in (mc_transparent_exit(), which
-    // exit() routes to) never runs in that case, the model checker never
-    // sees main check in after a restart -- it just watches the whole
-    // process really exit out from under it. An explicit exit() call is a
-    // normal, interposable function call, so it checks in correctly.
-    exit(0);
+    // Plain return, deliberately NOT an explicit exit(0) call: this is now
+    // a live regression test for interception.c's __libc_start_main hook,
+    // which runs mc_transparent_exit() after main() returns however it
+    // returns, catching exactly this case -- see that file for why a plain
+    // return used to bypass every exit()/_exit() interposition technique.
+    return 0;
 }

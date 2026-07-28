@@ -331,3 +331,44 @@ int libpthread_sem_wait_loop(sem_t *sem) {
     rc = libpthread_sem_wait(sem);
   return rc;
 }
+
+// __libc_start_main() is called from _start (crt1.o), not glibc-internal
+// code, so unlike exit()/_exit() -- whose implicit post-main() call chain
+// resolves through glibc-internal hidden aliases that bypass any public-
+// symbol interposition (see test/tsan_support/test_implicit_exit_interposition.c)
+// -- this call site goes through ordinary dynamic symbol resolution and can
+// be intercepted like any other public symbol. Used to guarantee
+// mc_transparent_exit()'s exit-transition/restart-quiescence handling runs
+// after the target's main() returns, even when it returns plainly
+// (`return N;`) rather than calling exit()/pthread_exit() explicitly --
+// verified in test/tsan_support/test_libc_start_main_hook.c.
+typedef int (*main_fn)(int, char **, char **);
+typedef int (*libc_start_main_fn)(main_fn, int, char **, void (*)(void),
+                                  void (*)(void), void (*)(void), void *);
+
+static main_fn real_main;
+
+static int wrapped_main(int argc, char **argv, char **envp) {
+  int rc = real_main(argc, argv, envp);
+  // libmcmini_init() itself is safe to call any time after main() has run
+  // (pthreads are certainly initialized by now), unlike at the top of
+  // __libc_start_main() below, which runs before glibc's own internal
+  // pthread-subsystem setup and must stay free of any pthread_once/mutex
+  // use until the real __libc_start_main() has had a chance to run.
+  libmcmini_init();
+  // Route a plain return from main() through the exact same model-checking
+  // exit protocol as an explicit exit(rc) call: mc_transparent_exit()
+  // itself performs the real, final process termination in every mode
+  // (see wrappers.c), so this call never returns.
+  mc_transparent_exit(rc);
+}
+
+int __libc_start_main(main_fn main, int argc, char **argv, void (*init)(void),
+                      void (*fini)(void), void (*rtld_fini)(void),
+                      void *stack_end) {
+  real_main = main;
+  libc_start_main_fn real_start_main =
+      (libc_start_main_fn)dlsym(RTLD_NEXT, "__libc_start_main");
+  return real_start_main(wrapped_main, argc, argv, init, fini, rtld_fini,
+                         stack_end);
+}
