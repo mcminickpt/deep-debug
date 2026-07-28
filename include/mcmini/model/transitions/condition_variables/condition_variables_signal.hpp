@@ -82,10 +82,11 @@ struct condition_variable_signal : public model::transition {
     condition_variable::state new_state = new_waiting_count > 0
                                           ? condition_variable::cv_waiting
                                           : condition_variable::cv_signaled;
-                              
-    s.add_state_for_obj(cond_id, new condition_variable(new_state, new_waiting_count));
-    condition_variable* mutable_cv = new condition_variable(new_state, new_waiting_count);
-    mutable_cv->check_for_lost_wakeup(true, prev_waiting_count); // Check for lost wakeup if this was a signal
+    // tid/mutex left at their sentinel defaults here (RID_INVALID/nullptr):
+    // neither is tracked yet at this point in the file's history.
+    s.add_state_for_obj(cond_id, new condition_variable(new_state, RID_INVALID, nullptr, new_waiting_count));
+    condition_variable mutable_cv(new_state, RID_INVALID, nullptr, new_waiting_count);
+    mutable_cv.check_for_lost_wakeup(true, prev_waiting_count); // Check for lost wakeup if this was a signal
 
     return status::exists;   
   }
