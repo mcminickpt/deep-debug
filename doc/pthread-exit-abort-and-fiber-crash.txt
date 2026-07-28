@@ -1,0 +1,83 @@
+pthread_exit() crashes: two separate bugs, neither ever exercised before
+==========================================================================
+
+Symptom
+-------
+No example in this repo called pthread_exit() explicitly (all just `return`
+from their thread routine), so this path had never been tested. Added
+producer-consumer-exit(-tsan) (identical to producer-consumer-safe, but
+each worker calls pthread_exit(NULL) instead of returning) to test it, per
+multithreaded-fork-tsan-2.0's test_exit.c standalone analog (which passes
+cleanly, and was the reference used to diagnose both bugs below).
+
+Bug 1: mc_pthread_exit() falls through to libc_abort() (classic mode too)
+--------------------------------------------------------------------------
+mc_pthread_exit()'s TARGET_BRANCH/TARGET_BRANCH_AFTER_RESTART case called
+mc_exit_thread_in_child() (or mc_exit_main_thread_in_child()) and then, with
+no further statement, fell through the switch into `default: { libc_abort();
+}` -- reproducible even in plain classic mode (no DMTCP at all): SIGABRT
+every time.
+
+Root cause: mc_exit_thread_in_child() only performs the model-checker-
+visible exit transition (mailbox message, then blocks until the eventual
+joiner grants permission) and returns once the thread is safe to really
+terminate -- it was never meant to be the final step. When a thread exits by
+*returning* from its start routine, mc_thread_routine_wrapper calls
+mc_exit_thread_in_child() from ITS OWN frame, so once it returns,
+mc_thread_routine_wrapper itself returns and the real OS thread terminates
+naturally via glibc. But mc_pthread_exit() is invoked from arbitrary depth
+inside the application's own call stack (pthread_exit() must never return
+to its caller), so simply returning from mc_pthread_exit() after
+mc_exit_thread_in_child() would incorrectly hand control back to the
+application -- something has to actually terminate the thread right there.
+
+Fix: call libpthread_pthread_exit() (the real, TSan-interceptor-bypassing
+pthread_exit, already used elsewhere in this file) after
+mc_exit_thread_in_child() returns. This alone fixes classic mode.
+
+Bug 2: real pthread_exit() crashes DMTCP-resurrected threads (SIGSEGV)
+------------------------------------------------------------------------
+With bug 1 fixed, DMTCP+TSan restart of a target whose threads existed
+before the checkpoint (and were therefore recreated via
+restart_child_threads_fast()'s libc_clone()+setcontext(), not a real
+pthread_create()) crashed instead: SIGSEGV, RIP=0, identical registers
+across independent runs (deterministic, not corruption). Confirmed via a
+targeted debug print that libpthread_pthread_exit_ptr itself was valid
+(same address as during recording) -- the crash is inside the real
+pthread_exit() call itself, not a null-pointer bug.
+
+Root cause: a clone()-resurrected thread is invisible to TSan's own thread
+registry (see the R3/R4 fixes for the analogous clone()-vs-fork problem);
+after resuming it's given a fresh TSan *fiber* rather than being a
+first-class TSan thread. glibc's real pthread_exit() forces a cleanup-
+unwind whose TSan-instrumented calls run against that fiber's state --
+which isn't a "real" thread's, and crashes. This is the exact, already-
+documented "Known limitation" in multithreaded-fork-tsan-2.0's README, and
+its tsan_join_shim.c's pthread_exit() override deliberately never calls
+real pthread_exit() for a recreated thread: it stashes the return value,
+switches onto a fresh (empty) TSan fiber, and terminates via a raw exit
+syscall instead (no unwind, no TSan interceptor -- kernel's
+CLONE_CHILD_CLEARTID still wakes any real joiner).
+
+This repo had no equivalent "is this thread one we recreated via clone()"
+query at all (dmtcp-callback.c's threadInfos[]/threadIdx already track
+exactly this, just with no accessor). Added mc_pthread_is_recreated_thread()
+(wrappers.h/dmtcp-callback.c), and mc_pthread_exit() now branches on it:
+a recreated thread gets the fiber-switch + raw `syscall(SYS_exit, 0)`
+treatment (real pthread_exit() never called); a normal thread still gets
+the real libpthread_pthread_exit() from the bug-1 fix. Unlike the tarball,
+no explicit exit-value stash was needed: mc_exit_thread_in_child()'s
+mailbox-based exit transition (executed before either termination path)
+already makes the model checker's join mechanism (mc_pthread_join) resolve
+correctly independent of any real futex-based join, so the raw exit syscall
+doesn't need to preserve that.
+
+Verification
+------------
+producer-consumer-exit-tsan: classic mode and 4/4 DMTCP+`--multithreaded-fork`
+record/restart cycles now complete cleanly (`Deep debugging completed!`),
+zero crashes, vs. 100% reproducible SIGABRT (classic) / SIGSEGV (restart)
+before. producer-consumer-safe-tsan and cv-producer-consumer-safe-tsan
+(neither calls pthread_exit() explicitly) regression-checked clean in both
+classic mode and DMTCP+restart, confirming no behavior change for the
+already-working return-based exit path.

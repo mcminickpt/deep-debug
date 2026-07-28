@@ -17,6 +17,16 @@
 #include "mcmini/Thread_queue.h"
 #include "mcmini/mcmini.h"
 
+// TSan's Fiber API (weak: no-ops for non-TSan targets), used by
+// mc_pthread_exit() to give a DMTCP-resurrected thread a fresh, empty TSan
+// shadow call stack before terminating it via a raw exit syscall -- see
+// that function and mc_pthread_is_recreated_thread()'s doc comment in
+// wrappers.h. Mirrors the same idiom already used in dmtcp-callback.c for
+// resurrected/forking threads' first resumption.
+extern void *__tsan_create_fiber(unsigned flags) __attribute__((weak));
+extern void __tsan_switch_to_fiber(void *fiber, unsigned flags)
+    __attribute__((weak));
+
 typedef struct pthread_map {
     pthread_t thread;
     runner_id_t value;
@@ -556,6 +566,49 @@ MCMINI_NO_RETURN void mc_transparent_abort(void) {
   }
 }
 
+MCMINI_NO_RETURN void mc_pthread_exit(void *retval) {
+  switch (get_current_mode()) {
+    case PRE_DMTCP_INIT:
+    case PRE_CHECKPOINT_THREAD:
+    case EXTERNAL_THREAD:
+    case RECORD:
+    case PRE_CHECKPOINT: {
+      libpthread_pthread_exit(retval);
+    }
+    case DMTCP_RESTART_INTO_BRANCH:
+    case DMTCP_RESTART_INTO_TEMPLATE: {
+      thread_get_mailbox()->type = THREAD_EXIT_TYPE;
+      thread_handle_after_dmtcp_restart();
+      // Fallthrough
+    }
+    case TARGET_BRANCH:
+    case TARGET_BRANCH_AFTER_RESTART: {
+      if (tid_self == RID_MAIN_THREAD) {
+        mc_exit_main_thread_in_child();  // never returns
+      } else {
+        mc_exit_thread_in_child();
+      }
+      // mc_exit_thread_in_child() only returns once safe to really
+      // terminate -- unlike returning from a start routine, pthread_exit()
+      // must never return to its caller, so do that for real here. A
+      // DMTCP-resurrected thread runs on a TSan fiber and crashes in
+      // glibc's real pthread_exit() (see doc/pthread-exit-abort-and-fiber-
+      // crash.txt); any other thread gets a real pthread_exit() as usual.
+      if (mc_pthread_is_recreated_thread(pthread_self())) {
+        if (__tsan_switch_to_fiber) {
+          __tsan_switch_to_fiber(__tsan_create_fiber(0), 0);
+        }
+        syscall(SYS_exit, 0);
+        libc_abort();  // unreachable
+      }
+      libpthread_pthread_exit(retval);
+    }
+    default: {
+      libc_abort();
+    }
+  }
+}
+
 struct mc_thread_routine_arg {
   void *arg;
   thread_routine routine;
@@ -1068,7 +1121,14 @@ static int mc_pthread_join_impl(pthread_t t, void **rv, bool defer_real_join,
         }
         return libpthread_pthread_join(t, rv);
       }
-      // This thread predates the restart, so DMTCP resurrected it via
+      if (!mc_pthread_is_recreated_thread(t)) {
+        // Never recreated: it already exited during RECORD mode, before
+        // any checkpoint. really_exited_sem is only posted post-restart,
+        // so waiting here would block forever -- the model already knows
+        // it's exited (see translate_recorded_runner_to_model()).
+        return 0;
+      }
+      // This thread predates the restart AND was recreated by DMTCP via
       // clone(), bypassing TSan's own pthread_create() interceptor
       // entirely. TSan has no Tid for it, so a real pthread_join() on it
       // can never resolve (see TSAN-pthread-join.md). Wait for its own
