@@ -1,0 +1,78 @@
+TSan reports false-positive races on mutex-protected globals
+==============================================================
+
+Symptom
+-------
+Classic-mode model checking of a TSan-instrumented target reports data
+races on globals that ARE correctly protected by a pthread_mutex_t in the
+source (e.g. cv-producer-consumer's `count`/`buffer`, producer-consumer's
+`buffer`) -- reproducibly, in most explored interleavings. The reports
+carry TSan's "As if synchronized via sleep" heuristic annotation, meaning
+TSan found no real synchronization primitive linking the two accesses and
+fell back to a weak, real-time-based heuristic instead.
+
+Root cause
+----------
+mc_pthread_mutex_lock()/mc_pthread_mutex_unlock() (and the mutex release/
+reacquire mc_pthread_cond_wait() does around its enqueue/wait mailbox
+round-trip) really lock/unlock the application's own pthread_mutex_t via
+libpthread_mutex_lock/unlock/timedlock -- resolved once at startup via a
+raw dlopen("libpthread.so")+dlsym() in interception.c, which always lands
+on real glibc, bypassing TSan's own pthread_mutex_lock/unlock interceptor
+entirely (unlike pthread_mutex_init, which -- being called by the
+application directly, not by one of these wrappers -- does reach TSan's
+interceptor; see the "Mutex M0 created at: ... tsan_interceptors_posix.cpp"
+frame in any of these race reports).
+
+Since TSan never sees the actual lock/unlock events, it has no way to
+establish a happens-before edge between one thread's critical section and
+another's, even though mcmini's own scheduler (in restart/branch modes) or
+the real OS mutex (in RECORD mode) correctly serializes them. Every
+variable the mutex protects looks racy to TSan as a result.
+
+This is the exact same class of bug already fixed once in this codebase,
+for mcmini_log()'s own log_mut (see log.c's comment) -- just not
+previously applied to the application's own mutex.
+
+Fix
+---
+Same fix as log_mut: TSan's public annotation API (__tsan_acquire/
+__tsan_release, declared weak, so they're a no-op when no TSan runtime is
+loaded). Call __tsan_acquire(mutex) right after every real lock succeeds,
+and __tsan_release(mutex) right before every real unlock, in
+mc_pthread_mutex_lock(), mc_pthread_mutex_unlock(), and around both real
+unlock/lock calls in mc_pthread_cond_wait()'s restart-branch handling.
+
+Verification
+------------
+producer-consumer-safe-tsan (see below) went from 79 false-positive races
+across explored interleavings in classic mode to zero. cv-producer-
+consumer-safe-tsan went from 208 (all of which turned out to be the
+unrelated a[] race below, confirmed via grep -c "Location is global
+'count'"/'buffer' returning 0) to zero. DMTCP+TSan record/restart cycles
+for both -safe targets stayed clean (no crash, no hang, no races).
+
+Unrelated finding along the way: -safe example variants
+---------------------------------------------------------
+While chasing this, a live gdb backtrace (during an unrelated DMTCP+TSan
+restart hang, since resolved -- see below) caught TSan mid-report for a
+genuine, pre-existing data race in producer-consumer.c/cv-producer-
+consumer.c's main(): both example programs size their thread-argument
+array to max(NUM_PRODUCERS, NUM_CONSUMERS) and reuse it across both
+pthread_create loops, so main()'s second loop can overwrite a producer's
+argument slot while that producer thread is still reading it. This race
+is unrelated to the TSan-annotation issue above (confirmed: it reproduces
+identically in ordinary, non-model-checked RECORD-mode runs), but its
+report-generation overlapping with a DMTCP checkpoint signal is what
+caused a genuine deadlock between DMTCP's checkpoint-quiescence signal
+handler and TSan's own internal locking (a separate, narrow DMTCP/TSan
+interaction hazard, not itself a mcmini bug).
+
+Rather than fix this race in the original example files, producer-
+consumer-safe.c and cv-producer-consumer-safe.c were added alongside them
+(and their own -tsan CMake targets): identical except each thread gets
+its own distinct argument-storage slot instead of sharing one reused
+array. This keeps the original files' latent race intact for whoever
+wants to study the DMTCP/TSan interaction above, while giving future
+McMini test/development work a race-free target to isolate other bugs
+against without that noise.

@@ -6,10 +6,12 @@ add_executable(cv-uninitialized cv-uninitialized.c)
 add_executable(deadly-embrace deadly-embrace.c)
 add_executable(fifo-example fifo.cpp)
 add_executable(producer-consumer producer-consumer.c)
+add_executable(producer-consumer-safe producer-consumer-safe.c)
 add_executable(producer-consumer-exit producer-consumer-exit.c)
 add_executable(producer-consumer-park producer-consumer-park.c)
 add_executable(exit-stress exit-stress.c)
 add_executable(cv-producer-consumer cv-producer-consumer.c)
+add_executable(cv-producer-consumer-safe cv-producer-consumer-safe.c)
 target_link_libraries(hello-world PUBLIC -pthread)
 target_link_libraries(cv-hello-world PUBLIC -pthread)
 target_link_libraries(cv-test PUBLIC -pthread)
@@ -17,10 +19,12 @@ target_link_libraries(mutex-uninitialized PUBLIC -pthread)
 target_link_libraries(cv-uninitialized PUBLIC -pthread)
 target_link_libraries(deadly-embrace PUBLIC -pthread)
 target_link_libraries(producer-consumer PUBLIC -pthread)
+target_link_libraries(producer-consumer-safe PUBLIC -pthread)
 target_link_libraries(producer-consumer-exit PUBLIC -pthread)
 target_link_libraries(producer-consumer-park PUBLIC -pthread)
 target_link_libraries(exit-stress PUBLIC -pthread)
 target_link_libraries(cv-producer-consumer PUBLIC -pthread)
+target_link_libraries(cv-producer-consumer-safe PUBLIC -pthread)
 
 # TSan-instrumented variant of producer-consumer, for testing McMini's
 # DMTCP-restart + TSan integration (see CLAUDE.md, "DMTCP-restart under
@@ -43,6 +47,23 @@ add_custom_command(TARGET producer-consumer-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:producer-consumer-tsan>
           ${CMAKE_BINARY_DIR}/producer-consumer-tsan)
+
+# Same as producer-consumer-tsan, but built from producer-consumer-safe.c --
+# identical except for a fixed pre-existing data race in main() (each thread
+# gets its own argument slot instead of sharing one reused array). Use this
+# target when a test needs to rule out that race, so it can focus on other
+# bugs (see doc/cond-wait-tsan-interceptor-bypass.txt's "Follow-on issue").
+add_executable(producer-consumer-safe-tsan producer-consumer-safe.c
+                                           ../lib/pthread_join_wrap.c)
+target_compile_options(producer-consumer-safe-tsan PUBLIC -fsanitize=thread)
+target_link_options(producer-consumer-safe-tsan PUBLIC -fsanitize=thread
+                                                        -Wl,--wrap=pthread_join)
+target_link_libraries(producer-consumer-safe-tsan PUBLIC -pthread libmcmini)
+
+add_custom_command(TARGET producer-consumer-safe-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:producer-consumer-safe-tsan>
+          ${CMAKE_BINARY_DIR}/producer-consumer-safe-tsan)
 
 # Same as producer-consumer-safe-tsan, but worker threads terminate via an
 # explicit pthread_exit() call instead of returning -- deliberately WITHOUT
@@ -129,3 +150,20 @@ add_custom_command(TARGET cv-producer-consumer-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:cv-producer-consumer-tsan>
           ${CMAKE_BINARY_DIR}/cv-producer-consumer-tsan)
+
+# Same as cv-producer-consumer-tsan, but built from cv-producer-consumer-safe.c
+# -- see producer-consumer-safe-tsan above for why.
+add_executable(cv-producer-consumer-safe-tsan cv-producer-consumer-safe.c
+                                              ../lib/pthread_join_wrap.c
+                                              ../lib/pthread_cond_wait_wrap.c)
+target_compile_options(cv-producer-consumer-safe-tsan PUBLIC -fsanitize=thread)
+target_link_options(cv-producer-consumer-safe-tsan PUBLIC
+  -fsanitize=thread
+  -Wl,--wrap=pthread_join
+  -Wl,--wrap=pthread_cond_wait)
+target_link_libraries(cv-producer-consumer-safe-tsan PUBLIC -pthread libmcmini)
+
+add_custom_command(TARGET cv-producer-consumer-safe-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:cv-producer-consumer-safe-tsan>
+          ${CMAKE_BINARY_DIR}/cv-producer-consumer-safe-tsan)
