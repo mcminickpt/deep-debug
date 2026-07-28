@@ -32,16 +32,28 @@ struct condition_variable_enqueue_thread : public model::transition{
       return status::disabled;
     }
 
-    condition_variable_status current_state = cv->get_policy()->get_thread_cv_state(executor);
+    // Clone the policy rather than mutating cv->get_policy() in place: `cv`
+    // points into the *previous*, already-committed state's object.
+    // transition::is_enabled_in() calls modify() against a throwaway
+    // diff_state purely to check the returned status, discarding the diff --
+    // but a mutation made directly on the old, shared policy object escapes
+    // that throwaway diff_state and permanently corrupts the committed
+    // state, even for a check that's never actually applied. See
+    // condition_variable::set_policy()'s comment for why the policy must be
+    // carried into the replacement object explicitly either way.
+    ConditionVariablePolicy* new_policy = cv->get_policy()->clone();
+    condition_variable_status current_state = new_policy->get_thread_cv_state(executor);
     if (current_state == CV_PREWAITING) {
     // Thread not fully in wait state - update to WAITING before proceeding
-      cv->get_policy()->update_thread_cv_state(executor, CV_WAITING);
+      new_policy->update_thread_cv_state(executor, CV_WAITING);
     }
 
-    cv->get_policy()->add_waiter_with_state(executor, CV_WAITING);
-    const int new_waiting_count = cv->get_policy()->return_wait_queue().size();
+    new_policy->add_waiter_with_state(executor, CV_WAITING);
+    const int new_waiting_count = new_policy->return_wait_queue().size();
 
-    s.add_state_for_obj(cond_id, new condition_variable(condition_variable::cv_waiting, executor, m->get_location(), new_waiting_count));
+    condition_variable* new_cv = new condition_variable(condition_variable::cv_waiting, executor, m->get_location(), new_waiting_count);
+    new_cv->set_policy(new_policy);
+    s.add_state_for_obj(cond_id, new_cv);
     // Preserve the mutex's location: mutex(state) (1-arg) has no default
     // member initializer for `location` (unlike condition_variable's
     // policy), so it's left completely uninitialized -- every later

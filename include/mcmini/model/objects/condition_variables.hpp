@@ -89,6 +89,11 @@ struct condition_variable : public model::visible_object_state {
 
   ConditionVariablePolicy* get_policy() const {return this->policy;}
 
+  // Carries a cloned/mutated policy into the replacement CV object;
+  // omitting this silently resets it to an empty policy, discarding
+  // whatever was just mutated (e.g. a newly registered waiter).
+  void set_policy(ConditionVariablePolicy* p) { this->policy = p; }
+
   void set_associated_mutex(pthread_mutex_t* mutex) {
     this->associated_mutex = mutex;
   }
