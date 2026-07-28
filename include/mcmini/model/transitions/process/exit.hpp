@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mcmini/model/objects/thread.hpp"
 #include "mcmini/model/transition.hpp"
 
 namespace model {
@@ -14,8 +15,14 @@ struct process_exit : public model::transition {
   ~process_exit() = default;
 
   status modify(model::mutable_state& s) const override {
-    // We ensure that exiting is never enabled. This ensures that it will never
-    // be explored by any model checking algorithm
+    // Mark the executor exited, like thread_exit does (minus its
+    // RID_MAIN_THREAD restriction, since exit()/abort() can end the process
+    // from any thread). Without this, is_active() keeps reporting true, so
+    // classic_dpor re-selects this same "enabled" transition forever for any
+    // exit code its program_exit_code() > 0 check doesn't already catch
+    // (i.e. exit code 0).
+    using namespace model::objects;
+    s.add_state_for_runner(executor, new thread(thread::exited));
     return status::exists;
   }
 
