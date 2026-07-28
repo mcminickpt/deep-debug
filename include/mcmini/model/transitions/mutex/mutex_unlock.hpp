@@ -25,7 +25,7 @@ struct mutex_unlock : public model::transition {
       return status::disabled;
     }
 
-    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked, ms->get_location(), 0));
+    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked, ms->get_location()));
     return status::exists;
   }
   state::objid_t get_id() const { return this->mutex_id; }
