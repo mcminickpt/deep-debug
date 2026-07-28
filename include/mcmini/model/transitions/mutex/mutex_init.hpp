@@ -17,7 +17,14 @@ struct mutex_init : public model::transition {
 
   status modify(model::mutable_state& s) const override {
     using namespace model::objects;
-    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked));
+    // Preserve the location set on the placeholder object created by
+    // mutex_init_callback (see mutex.cpp) -- the 1-arg mutex(state)
+    // constructor used below has no default member initializer for
+    // `location`, so it would otherwise be left uninitialized, corrupting
+    // every later mutex_lock/unlock that faithfully forwards whatever
+    // garbage ms->get_location() reads back afterward.
+    const mutex* ms = s.get_state_of_object<mutex>(mutex_id);
+    s.add_state_for_obj(mutex_id, new mutex(mutex::unlocked, ms->get_location()));
     return status::exists;
   }
   state::objid_t get_id() const { return this->mutex_id; }
