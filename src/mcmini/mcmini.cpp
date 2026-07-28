@@ -172,6 +172,47 @@ void found_abnormal_termination(
   std::cout.flush();
 }
 
+void found_nonzero_exit_code(
+    const coordinator& c, const stats& stats,
+    const real_world::process::nonzero_exit_code_error& nzec) {
+  std::cerr << "NONZERO EXIT CODE (" << nzec.exit_code << "):\n"
+            << nzec.what() << std::endl;
+
+  std::stringstream ss;
+  const auto& program_model = c.get_current_program_model();
+  ss << "TRACE " << stats.trace_id << "\n";
+  for (const auto& t : program_model.get_trace()) {
+    ss << "thread " << t->get_executor() << ": " << t->to_string() << "\n";
+  }
+  // See found_abnormal_termination()'s identical comment: `nzec.culprit` may
+  // no longer have a pending transition in the model's current view if this
+  // fired while `coordinator::return_to_depth()` was replaying history.
+  const transition* culprit_transition =
+      program_model.get_pending_transition_for(nzec.culprit);
+  if (culprit_transition != nullptr) {
+    ss << "thread " << culprit_transition->get_executor() << ": "
+       << culprit_transition->to_string() << "\n";
+  } else {
+    ss << "thread " << nzec.culprit << ": (no longer pending)\n";
+  }
+
+  ss << "\nNEXT THREAD OPERATIONS\n";
+  for (const auto& tpair : program_model.get_pending_transitions()) {
+    if (culprit_transition != nullptr &&
+        tpair.first == culprit_transition->get_executor()) {
+      ss << "thread " << tpair.first << ": executing"
+         << "\n";
+    } else {
+      ss << "thread " << tpair.first << ": " << tpair.second->to_string()
+         << "\n";
+    }
+  }
+  ss << stats.total_transitions + 1 << " total transitions executed"
+     << "\n";
+  std::cout << ss.str();
+  std::cout.flush();
+}
+
 void found_deadlock(const coordinator& c, const stats& stats) {
   std::cerr << "DEADLOCK" << std::endl;
   std::stringstream ss;
@@ -204,6 +245,7 @@ void do_model_checking(const config& config) {
   c.deadlock = &found_deadlock;
   c.undefined_behavior = &found_undefined_behavior;
   c.abnormal_termination = &found_abnormal_termination;
+  c.nonzero_exit_code = &found_nonzero_exit_code;
   classic_dpor_checker.verify_using(coordinator, c);
   std::cout << "Model checking completed!" << std::endl;
 }
@@ -328,6 +370,7 @@ void do_model_checking_from_dmtcp_ckpt_file(const config& config) {
   c.undefined_behavior = &found_undefined_behavior;
   c.deadlock = &found_deadlock;
   c.abnormal_termination = &found_abnormal_termination;
+  c.nonzero_exit_code = &found_nonzero_exit_code;
   classic_dpor_checker.verify_using(coordinator, c);
   std::cerr << "Deep debugging completed!" << std::endl;
 }

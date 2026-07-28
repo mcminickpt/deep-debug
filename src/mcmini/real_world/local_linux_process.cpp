@@ -133,9 +133,25 @@ volatile runner_mailbox *local_linux_process::execute_runner(runner_id_t id) {
           "process to abnormally exit (or possibly an internal error of "
           "McMini): " + std::string(strerror(errno)));
     } else if (WIFEXITED(status)) {
-      throw process::nonzero_exit_code_error(
-          WEXITSTATUS(status), id,
-          "The program exited with code " + std::to_string(WEXITSTATUS(status)));
+      const int exit_code = WEXITSTATUS(status);
+      if (exit_code != 0) {
+        throw process::nonzero_exit_code_error(
+            exit_code, id, "The program exited with code " + std::to_string(exit_code));
+      }
+      // A clean (code 0) exit reaching this SIGCHLD-based detection path is
+      // not the same situation nonzero_exit_code_error reports: that
+      // exception means the *target program* exited abnormally, a bug for
+      // the user to fix. Here, the whole process fully terminated on its
+      // own while this runner still had a transition pending on it -- i.e.
+      // it bypassed the model-driven exit protocol (mc_transparent_exit(),
+      // fixed in commit 6bed56a, deliberately keeps the process alive
+      // across both of its mailbox rounds before ever calling the real
+      // exit(2)) rather than checking in normally. That is a McMini-side
+      // protocol violation to investigate, not a target-program bug.
+      throw process::execution_error(
+          "Runner " + std::to_string(id) +
+          "'s process exited normally (code 0) while a transition was "
+          "still pending on it, bypassing the model-driven exit protocol.");
     } else if (WIFSIGNALED(status)) {
       throw process::termination_error(
           WTERMSIG(status), id,
