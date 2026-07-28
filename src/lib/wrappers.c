@@ -17,6 +17,14 @@
 #include "mcmini/Thread_queue.h"
 #include "mcmini/mcmini.h"
 
+// TSan's public annotation API (see <sanitizer/tsan_interface.h>): same
+// idiom as log_mut in log.c. The real lock/unlock here bypasses TSan's
+// interceptor entirely (mc_load_intercepted_pthread_functions() in
+// interception.c), causing a false race on every mutex-protected variable
+// (e.g. cv-producer-consumer's count/buffer) without this annotation.
+extern void __tsan_acquire(void *addr) __attribute__((weak));
+extern void __tsan_release(void *addr) __attribute__((weak));
+
 // TSan's Fiber API (weak: no-ops for non-TSan targets), used by
 // mc_pthread_exit() to give a DMTCP-resurrected thread a fresh, empty TSan
 // shadow call stack before terminating it via a raw exit syscall -- see
@@ -280,7 +288,9 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case EXTERNAL_THREAD: {
-      return libpthread_mutex_lock(mutex);
+      int rc = libpthread_mutex_lock(mutex);
+      if (rc == 0 && __tsan_acquire) __tsan_acquire(mutex);
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -317,6 +327,7 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
           mutex_record->vo.mut_state.status = LOCKED;
           mutex_record->vo.mut_state.owner = tid_self;
           libpthread_mutex_unlock(&rec_list_lock);
+          if (__tsan_acquire) __tsan_acquire(mutex);
           return rc;
         } else if (rc == ETIMEDOUT) {  // If the lock failed.
           // Here, the user-space thread did not manage to acquire
@@ -346,7 +357,9 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
       mb->type = MUTEX_LOCK_TYPE;
       memcpy_v(mb->cnts, &mutex, sizeof(mutex));
       thread_handle_after_dmtcp_restart();
-      return libpthread_mutex_lock(mutex);
+      int rc = libpthread_mutex_lock(mutex);
+      if (rc == 0 && __tsan_acquire) __tsan_acquire(mutex);
+      return rc;
     }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
@@ -354,7 +367,9 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
       mb->type = MUTEX_LOCK_TYPE;
       memcpy_v(mb->cnts, &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
-      return libpthread_mutex_lock(mutex);
+      int rc = libpthread_mutex_lock(mutex);
+      if (rc == 0 && __tsan_acquire) __tsan_acquire(mutex);
+      return rc;
     }
     default: {
       // Wrapper functions should not be executing
@@ -372,6 +387,7 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case EXTERNAL_THREAD: {
+      if (__tsan_release) __tsan_release(mutex);
       return libpthread_mutex_unlock(mutex);
     }
     case RECORD:
@@ -388,6 +404,7 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
         libc_abort();
       }
       libpthread_mutex_unlock(&rec_list_lock);
+      if (__tsan_release) __tsan_release(mutex);
       int rc = libpthread_mutex_unlock(mutex);
       if (rc == 0) {  // Unlock succeeded
         libpthread_mutex_lock(&rec_list_lock);
@@ -403,6 +420,7 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
       mb->type = MUTEX_UNLOCK_TYPE;
       memcpy_v(mb->cnts, &mutex, sizeof(mutex));
       thread_handle_after_dmtcp_restart();
+      if (__tsan_release) __tsan_release(mutex);
       return libpthread_mutex_unlock(mutex);
     }
     case TARGET_BRANCH:
@@ -411,6 +429,7 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
       mb->type = MUTEX_UNLOCK_TYPE;
       memcpy_v(mb->cnts, &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
+      if (__tsan_release) __tsan_release(mutex);
       return libpthread_mutex_unlock(mutex);
     }
     default: {
@@ -1280,7 +1299,13 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
         struct timespec wait_time;
         clock_gettime(CLOCK_REALTIME, &wait_time);
         wait_time.tv_sec += 2;
+        // pthread_cond_timedwait() really unlocks/relocks mutex every
+        // iteration, even on ETIMEDOUT; same interceptor bypass as the
+        // TARGET_BRANCH/DMTCP_RESTART_INTO_* cases below, needing the
+        // same annotation here too.
+        if (__tsan_release) __tsan_release(mutex);
         rc = libpthread_cond_timedwait(cond, mutex, &wait_time);
+        if (__tsan_acquire) __tsan_acquire(mutex);
         if (rc == 0) {
           // The thread has successfully entered the waiting state.
           libpthread_mutex_lock(&rec_list_lock);
@@ -1348,6 +1373,7 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_handle_after_dmtcp_restart();
+      if (__tsan_release) __tsan_release(mutex);
       libpthread_mutex_unlock(mutex);
       mb->type = COND_WAIT_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
@@ -1365,6 +1391,7 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       // second-and-later round with the coordinator.
       thread_wake_scheduler_and_wait();
       libpthread_mutex_lock(mutex);
+      if (__tsan_acquire) __tsan_acquire(mutex);
       return 0;
     }
     case TARGET_BRANCH:
@@ -1374,12 +1401,14 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
+      if (__tsan_release) __tsan_release(mutex);
       libpthread_mutex_unlock(mutex);
       mb->type = COND_WAIT_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
       libpthread_mutex_lock(mutex);
+      if (__tsan_acquire) __tsan_acquire(mutex);
       return 0;
     }
     default: {
