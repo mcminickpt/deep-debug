@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mcmini/defines.h"
 #include "mcmini/misc/extensions/unique_ptr.hpp"
 #include "mcmini/model/visible_object_state.hpp"
 
@@ -20,9 +21,16 @@ struct mutex : public model::visible_object_state {
   mutex() = default;
   ~mutex() = default;
   mutex(const mutex &) = default;
-  mutex(state s) : current_state(s) {}
-  mutex(state s, pthread_mutex_t* loc) : current_state(s), location(loc) {}
-  mutex(state s, pthread_mutex_t* loc, runner_id_t tid): current_state(s), location(loc), owner(tid) {}
+  // `location` has no default member initializer (unlike, say,
+  // condition_variable's `policy`), so it must always be passed explicitly
+  // -- a mutex without its real address is meaningless, and every
+  // mutex_lock/unlock faithfully forwards whatever get_location() returns,
+  // so an uninitialized one corrupts every subsequent state derived from
+  // it (see doc history around commit 9bd9ecf). `tid` defaults to
+  // RID_INVALID: "unlocked, no owner" is exactly what callers that omit it
+  // (mutex_init, condition_variable_enqueue_thread) mean.
+  mutex(state s, pthread_mutex_t* loc, runner_id_t tid = RID_INVALID)
+      : current_state(s), location(loc), owner(tid) {}
   
   // ---- State Observation --- //
   bool operator==(const mutex &other) const {
