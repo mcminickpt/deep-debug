@@ -15,13 +15,12 @@ model::transition* cond_init_callback(runner_id_t p,
 
   // Locate the corresponding model of this object
   if (!m.contains(remote_cond)) {
-    // FIXME: Allow dynamic selection of wakeup policies.
-    // For now, we hard-code it here. Not great, but at least
-    // we can change it relatively easily still
-    ConditionVariablePolicy* policy = new ConditionVariableArbitraryPolicy();
-      m.observe_object(remote_cond, 
-      new condition_variable(
-        condition_variable::state::cv_initialized, policy));  
+    // FIXME: Allow dynamic selection of wakeup policies. For now, the
+    // constructor's default (a fresh ConditionVariableArbitraryPolicy) is
+    // hard-coded. Not great, but at least we can change it relatively
+    // easily still.
+    m.observe_object(remote_cond,
+                     new condition_variable(condition_variable::state::cv_initialized));
   }
     
   state::objid_t const cond = m.get_model_of_object(remote_cond);

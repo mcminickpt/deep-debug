@@ -24,7 +24,7 @@ struct condition_variable : public model::visible_object_state {
   };
 
  private:
-  state current_state = state::cv_uninitialized; 
+  state current_state = state::cv_uninitialized;
   bool hadwaiters;
   mutable unsigned int numRemainingSpuriousWakeups = 0;
   runner_id_t running_thread;
@@ -32,39 +32,46 @@ struct condition_variable : public model::visible_object_state {
   int waiting_count = 0;
   int prev_waiting_count = 0;
   int lost_wakeups = 0;
-  ConditionVariablePolicy* policy = new ConditionVariableArbitraryPolicy();  
+  ConditionVariablePolicy* policy;
 
  public:
   condition_variable() = default;
   ~condition_variable() = default;
   condition_variable(const condition_variable &) = default;
-  condition_variable(state s) : current_state(s) {}
-  condition_variable(state s, ConditionVariablePolicy* p) : current_state(s), policy(p) {}
-  condition_variable(state s, int count) : current_state(s) {}
-  condition_variable(state s, runner_id_t tid, pthread_mutex_t* mutex, int count) 
-    : current_state(s), running_thread(tid), associated_mutex(mutex), waiting_count(count){}
-
-  condition_variable(state s, runner_id_t tid, pthread_mutex_t* mutex, int count, 
-    const std::vector<std::pair<runner_id_t, condition_variable_status>>& thread_states) 
-      : current_state(s), running_thread(tid), associated_mutex(mutex), waiting_count(count) {
-        // Initialize the policy according to the states of the threads in waiting queue
-        for (const auto& thread_with_state : thread_states) {
-          if (thread_with_state.second == CV_PREWAITING || thread_with_state.second == CV_WAITING) {
-            this->policy->add_waiter_with_state(thread_with_state.first,thread_with_state.second);
-          }
-        }
-        std::vector<runner_id_t> signaled_threads;
-        for (const auto& thread_with_state : thread_states) {
-          if (thread_with_state.second == CV_SIGNALED) {
-            signaled_threads.push_back(thread_with_state.first);
-          }
-        }
-        if (!signaled_threads.empty()) {
-          // If there are any threads that have been signaled, we should
-          // add them to the wake groups in the policy.
-          this->policy->add_to_wake_groups(signaled_threads);
-        }
-      } 
+  // The only non-copy constructor: `tid`/`mutex` get sentinel defaults
+  // (RID_INVALID/nullptr) rather than being left uninitialized (there was
+  // previously no default member initializer for either, unlike `waiting_count`)
+  // -- e.g. mutex(state, location) needed the identical fix for `location`
+  // after commit 9bd9ecf. `p` (policy) defaults to nullptr meaning "create a
+  // fresh one"; every transition that advances an *existing* condition
+  // variable's state must still pass its own (possibly cloned) policy
+  // explicitly here or via set_policy() afterward -- see that setter's
+  // comment for why an omitted policy silently discards in-progress waiter
+  // tracking rather than just being harmlessly empty.
+  condition_variable(state s, runner_id_t tid = RID_INVALID,
+                     pthread_mutex_t* mutex = nullptr, int count = 0,
+                     const std::vector<std::pair<runner_id_t, condition_variable_status>>& thread_states = {},
+                     ConditionVariablePolicy* p = nullptr)
+      : current_state(s), running_thread(tid), associated_mutex(mutex), waiting_count(count),
+        policy(p ? p : new ConditionVariableArbitraryPolicy()) {
+    // Initialize the policy according to the states of the threads in waiting queue
+    for (const auto& thread_with_state : thread_states) {
+      if (thread_with_state.second == CV_PREWAITING || thread_with_state.second == CV_WAITING) {
+        this->policy->add_waiter_with_state(thread_with_state.first,thread_with_state.second);
+      }
+    }
+    std::vector<runner_id_t> signaled_threads;
+    for (const auto& thread_with_state : thread_states) {
+      if (thread_with_state.second == CV_SIGNALED) {
+        signaled_threads.push_back(thread_with_state.first);
+      }
+    }
+    if (!signaled_threads.empty()) {
+      // If there are any threads that have been signaled, we should
+      // add them to the wake groups in the policy.
+      this->policy->add_to_wake_groups(signaled_threads);
+    }
+  }
   // ---- State Observation --- //
   bool operator==(const condition_variable &other) const {
     return this->current_state == other.current_state;
