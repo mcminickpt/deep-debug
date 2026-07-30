@@ -701,6 +701,16 @@ void *dmtcp_create_checkpoint_thread_wrapper(void *arg) {
   // subsequent wrapped call, during which ckpt_pthread_descriptor is not
   // yet set (previously guaranteed set by the time createCkptThread()
   // returned).
+  //
+  // This thread may be TSAN's own background thread, nested-spawned from
+  // inside TSAN's own pthread_create interceptor while it was still handling
+  // the real checkpoint thread's creation request, and such a thread never
+  // goes through TSAN's own thread registration -- so it has no TSAN
+  // ThreadState of its own. That's safe here: mc_pthread_create()'s
+  // PRE_CHECKPOINT_THREAD case already forced libmcmini_init() to complete
+  // on the creating thread before spawning this one, so libmcmini_init()'s
+  // own fast path (see interception.c) means this call never reaches
+  // pthread_once()/TSAN's interceptor at all.
   libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
 
   mark_ckpt_window_candidate((int)syscall(SYS_gettid));
@@ -746,6 +756,19 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       // Either way, the new thread figures out which one it is for itself,
       // once running; we just need to synchronize enough to know it has
       // started before returning here.
+      //
+      // Force libmcmini_init()'s lazy resolution to complete HERE, on this
+      // (already TSAN-registered) thread, before the new thread is spawned.
+      // The new thread may turn out to be TSAN's own background thread,
+      // which never gets its own TSAN ThreadState (see
+      // dmtcp_create_checkpoint_thread_wrapper()) -- calling libmcmini_init()
+      // there would reach pthread_once(), which TSAN's own interceptor
+      // intercepts and crashes on for exactly that reason. pthread_create()
+      // below is itself a synchronization point, so completing the
+      // resolution here guarantees it's visible on the new thread without
+      // it ever needing to call libmcmini_init() itself.
+      libmcmini_init();
+
       struct mc_thread_routine_arg *wrapped_arg =
           malloc(sizeof(struct mc_thread_routine_arg));
       wrapped_arg->arg = arg;
@@ -771,6 +794,18 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     case PRE_CHECKPOINT:
     case DMTCP_RESTART_INTO_BRANCH:
     case DMTCP_RESTART_INTO_TEMPLATE: {
+      // Force libmcmini_init()'s lazy resolution to complete HERE, on this
+      // (already TSAN-registered) thread, before the new thread is spawned.
+      // Under DMTCP, the new thread's own prologue (mc_thread_routine_wrapper
+      // -> mc_register_this_thread(), wrappers.c) runs before TSAN's own
+      // registration trampoline does (see TSAN-McMini-DMTCP.txt), so it has
+      // no TSAN ThreadState yet when it makes its own first wrapped call.
+      // pthread_create() below is itself a synchronization point, so
+      // completing the resolution here guarantees libmcmini_init()'s fast
+      // path (see interception.c) applies on the new thread, and it never
+      // needs to reach pthread_once()/TSAN's interceptor itself.
+      libmcmini_init();
+
       // TODO: add support for thread attributes
       struct mc_thread_routine_arg *libmcmini_controlled_thread_arg =
           malloc(sizeof(struct mc_thread_routine_arg));
@@ -874,6 +909,24 @@ int mc_pthread_join(pthread_t t, void **rv) {
         // Use the libtsan-bypassing handle: a direct pthread_timedjoin_np would
         // hit libtsan's interceptor and trip its thread-registry CHECK under
         // DMTCP. See TSAN-McMini-DMTCP.txt.
+        //
+        // FIXME: bypassing TSAN's interceptor here means TSAN never sees this
+        // join, so at exit it reports "ThreadSanitizer: thread leak" for
+        // every thread joined this way, even though the real join above
+        // genuinely succeeded and reaped the thread. TSAN labels this a
+        // WARNING (not "ERROR: ThreadSanitizer: ..."), but it still counts
+        // toward TSAN's report tally and triggers TSAN's default nonzero
+        // exitcode (66) same as any other detected issue. If TSAN_OPTIONS
+        // includes halt_on_error:true (or halt_on_error=1), TSAN treats ANY
+        // detected issue -- this leak included -- as fatal and can exit
+        // immediately at the point of detection rather than letting the
+        // program run to completion. Accepted trade-off for now: the
+        // registry CHECK this bypass avoids is a hard abort, strictly worse
+        // than a leak report. A TSAN suppressions file line of the form
+        // "thread:PATH_TO/libmcmini.so" may suppress this specific leak
+        // report if it becomes a problem (not yet tried/verified here).
+        // "called_from_lib:libmcmini.so" is an alternate suppression line
+        // that may work instead (also not yet tried/verified).
         int rc = libpthread_timedjoin_np(t, rv, &time);
         if (rc == 0) {  // Join succeeded
           libpthread_mutex_lock(&rec_list_lock);

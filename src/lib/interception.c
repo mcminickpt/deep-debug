@@ -12,6 +12,14 @@
 
 pthread_once_t libmcini_init = PTHREAD_ONCE_INIT;
 
+// Set once mc_load_intercepted_pthread_functions() has fully completed.
+// Plain flag, not itself pthread_once/TSAN-intercepted. libmcmini_init()
+// checks this directly (see below), so that once initialization has truly
+// completed, EVERY later call -- from any thread, including ones with no
+// TSAN ThreadState of their own -- takes a plain-memory fast path and never
+// touches pthread_once()/TSAN's interceptor at all.
+static bool libmcmini_init_done = false;
+
 typeof(&pthread_create) libpthread_pthread_create_ptr;
 typeof(&pthread_create) libdmtcp_pthread_create_ptr;
 typeof(&pthread_create) tsan_or_real_pthread_create_ptr;
@@ -42,7 +50,21 @@ typeof(&fork) fork_ptr;
 typeof(&libc_clone) clone_ptr;
 
 void libmcmini_init(void) {
+  // Fast path: a brand-new thread that hasn't gone through TSAN's own
+  // pthread_create interceptor yet (e.g. TSAN's own lazily-spawned
+  // background thread, or a DMTCP-under-TSAN worker thread whose prologue
+  // runs before TSAN's registration trampoline -- see wrappers.c's
+  // dmtcp_create_checkpoint_thread_wrapper() and mc_thread_routine_wrapper())
+  // has no TSAN ThreadState. pthread_once() itself is TSAN-intercepted and
+  // crashes dereferencing that nonexistent ThreadState. Once initialization
+  // has genuinely completed once (by anyone), there's nothing left to do, so
+  // skip pthread_once() -- and the TSAN interceptor call it would make --
+  // entirely.
+  if (libmcmini_init_done) {
+    return;
+  }
   pthread_once(&libmcini_init, &mc_load_intercepted_pthread_functions);
+  libmcmini_init_done = true;
 }
 
 void mc_load_intercepted_pthread_functions(void) {
