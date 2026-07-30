@@ -8,6 +8,7 @@ add_executable(fifo-example fifo.cpp)
 add_executable(producer-consumer producer-consumer.c)
 add_executable(producer-consumer-exit producer-consumer-exit.c)
 add_executable(producer-consumer-park producer-consumer-park.c)
+add_executable(exit-stress exit-stress.c)
 add_executable(cv-producer-consumer cv-producer-consumer.c)
 target_link_libraries(hello-world PUBLIC -pthread)
 target_link_libraries(cv-hello-world PUBLIC -pthread)
@@ -18,6 +19,7 @@ target_link_libraries(deadly-embrace PUBLIC -pthread)
 target_link_libraries(producer-consumer PUBLIC -pthread)
 target_link_libraries(producer-consumer-exit PUBLIC -pthread)
 target_link_libraries(producer-consumer-park PUBLIC -pthread)
+target_link_libraries(exit-stress PUBLIC -pthread)
 target_link_libraries(cv-producer-consumer PUBLIC -pthread)
 
 # Same as producer-consumer-safe-tsan, but worker threads terminate via an
@@ -54,3 +56,33 @@ add_custom_command(TARGET producer-consumer-park-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:producer-consumer-park-tsan>
           ${CMAKE_BINARY_DIR}/producer-consumer-park-tsan)
+
+# Stress test for pthread_exit() robustness at higher thread counts (see
+# exit-stress.c) -- same build recipe as producer-consumer-exit-tsan above.
+add_executable(exit-stress-tsan exit-stress.c
+                                ../lib/pthread_join_wrap.c)
+target_compile_options(exit-stress-tsan PUBLIC -fsanitize=thread)
+target_link_options(exit-stress-tsan PUBLIC -fsanitize=thread
+                                            -Wl,--wrap=pthread_join)
+target_link_libraries(exit-stress-tsan PUBLIC -pthread libmcmini)
+
+add_custom_command(TARGET exit-stress-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:exit-stress-tsan>
+          ${CMAKE_BINARY_DIR}/exit-stress-tsan)
+
+# Same build recipe as exit-stress-tsan above. Reliably (4/4 attempts)
+# reproduces a genuine checkpoint-thread/TSAN-background-thread startup
+# race, distinct from the restoreBuf={0,0} bug this was originally meant to
+# help isolate -- see exit-stress-noop.c's own header comment.
+add_executable(exit-stress-noop-tsan exit-stress-noop.c
+                                     ../lib/pthread_join_wrap.c)
+target_compile_options(exit-stress-noop-tsan PUBLIC -fsanitize=thread)
+target_link_options(exit-stress-noop-tsan PUBLIC -fsanitize=thread
+                                                 -Wl,--wrap=pthread_join)
+target_link_libraries(exit-stress-noop-tsan PUBLIC -pthread libmcmini)
+
+add_custom_command(TARGET exit-stress-noop-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:exit-stress-noop-tsan>
+          ${CMAKE_BINARY_DIR}/exit-stress-noop-tsan)
