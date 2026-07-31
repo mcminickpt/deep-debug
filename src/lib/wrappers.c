@@ -887,7 +887,13 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
         // notify_template_thread();
         // thread_await_scheduler();
         thread_handle_after_dmtcp_restart();
-        return libpthread_cond_init(cond, attr);
+        // Do NOT call the real libpthread_cond_init() here: see
+        // doc/glibc-cond-var-desync.txt. Past this point mc_pthread_cond_wait()
+        // never touches the real cond_t again either, so reinitializing it
+        // would only risk racing a clone()-resurrected thread that is still
+        // genuinely blocked inside a pre-restart real pthread_cond_timedwait()
+        // call, for no benefit.
+        return 0;
       }
       case TARGET_BRANCH:
       case TARGET_BRANCH_AFTER_RESTART: {
@@ -895,7 +901,9 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
         mb->type = COND_INIT_TYPE;
         memcpy_v(mb->cnts, &cond, sizeof(cond));
         thread_wake_scheduler_and_wait();
-        return libpthread_cond_init(cond, attr);
+        // See the DMTCP_RESTART_INTO_BRANCH/TEMPLATE case above: no real
+        // libpthread_cond_init() call here either.
+        return 0;
       }
       default: {
         libc_abort();
@@ -1121,7 +1129,17 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       // notify_template_thread();
       // thread_await_scheduler();
       thread_handle_after_dmtcp_restart();
-      return libpthread_cond_signal(cond);
+      // Do NOT call the real libpthread_cond_signal() here: see
+      // doc/glibc-cond-var-desync.txt. mc_pthread_cond_wait() never blocks on
+      // the real cond_t in any post-restart mode (it is fully simulated via
+      // the mailbox handshake above), so a real signal here serves no
+      // purpose for the model checker -- it is pure risk. Specifically, a
+      // clone()-resurrected thread can still be genuinely, kernel-level
+      // blocked inside a pre-restart real pthread_cond_timedwait() call; a
+      // real signal reaching it here would wake it for real, letting it run
+      // further application code without the model checker's scheduling
+      // permission and breaking DPOR's single-stepping invariant.
+      return 0;
     }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
@@ -1129,7 +1147,9 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       mb->type = COND_SIGNAL_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       thread_wake_scheduler_and_wait();
-      return libpthread_cond_signal(cond);
+      // See the DMTCP_RESTART_INTO_BRANCH/TEMPLATE case above: no real
+      // libpthread_cond_signal() call here either.
+      return 0;
     }
     default: {
       // Wrapper functions should not be executing
@@ -1183,7 +1203,10 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
       mb->type = COND_BROADCAST_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       thread_handle_after_dmtcp_restart();
-      return libpthread_cond_broadcast(cond);
+      // Do NOT call the real libpthread_cond_broadcast() here: see
+      // mc_pthread_cond_signal()'s identical reasoning above and
+      // doc/glibc-cond-var-desync.txt.
+      return 0;
     }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
@@ -1191,7 +1214,9 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
       mb->type = COND_BROADCAST_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       thread_wake_scheduler_and_wait();
-      return libpthread_cond_broadcast(cond);
+      // See the DMTCP_RESTART_INTO_BRANCH/TEMPLATE case above: no real
+      // libpthread_cond_broadcast() call here either.
+      return 0;
     }
     default: {
       libc_abort();
@@ -1241,7 +1266,12 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond) {
       mb->type = COND_DESTROY_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       thread_handle_after_dmtcp_restart();
-      return libpthread_cond_destroy(cond);
+      // Do NOT call the real libpthread_cond_destroy() here: see
+      // mc_pthread_cond_signal()'s identical reasoning above and
+      // doc/glibc-cond-var-desync.txt. The model checker already tracks
+      // CV_DESTROYED itself; the real cond_t's memory is never touched
+      // again regardless.
+      return 0;
     }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
@@ -1249,7 +1279,9 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond) {
       mb->type = COND_DESTROY_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       thread_wake_scheduler_and_wait();
-      return libpthread_cond_destroy(cond);
+      // See the DMTCP_RESTART_INTO_BRANCH/TEMPLATE case above: no real
+      // libpthread_cond_destroy() call here either.
+      return 0;
     }
     default: {
       libc_abort();
