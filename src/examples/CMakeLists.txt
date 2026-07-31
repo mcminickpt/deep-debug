@@ -5,12 +5,14 @@ add_executable(deadly-embrace deadly-embrace.c)
 add_executable(fifo-example fifo.cpp)
 add_executable(producer-consumer producer-consumer.c)
 add_executable(producer-consumer-park producer-consumer-park.c)
+add_executable(cv-producer-consumer cv-producer-consumer.c)
 target_link_libraries(hello-world PUBLIC -pthread)
 target_link_libraries(cv-hello-world PUBLIC -pthread)
 target_link_libraries(cv-test PUBLIC -pthread)
 target_link_libraries(deadly-embrace PUBLIC -pthread)
 target_link_libraries(producer-consumer PUBLIC -pthread)
 target_link_libraries(producer-consumer-park PUBLIC -pthread)
+target_link_libraries(cv-producer-consumer PUBLIC -pthread)
 
 # producer-consumer-park.c never calls pthread_join() or pthread_exit() --
 # main returns while both workers are still alive, parked forever on an
