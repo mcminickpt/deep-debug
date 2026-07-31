@@ -1012,7 +1012,18 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       mb->type = COND_WAIT_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
-      thread_handle_after_dmtcp_restart();
+      // thread_handle_after_dmtcp_restart() (used for the COND_ENQUEUE_TYPE
+      // round above) is a one-time-per-thread restart check-in: it captures
+      // a getcontext() snapshot and posts the quiescence barrier that the
+      // background template thread waits on exactly once per real thread. By
+      // the time this second round runs, that barrier has already released
+      // and set mode to TARGET_BRANCH_AFTER_RESTART, so a second call falls
+      // into thread_handle_after_dmtcp_restart()'s `default: libc_abort()`
+      // (its mode_on_entry no longer matches DMTCP_RESTART_INTO_BRANCH/
+      // TEMPLATE) -- confirmed live via dmesg showing a SIGABRT here. Use the
+      // ordinary wake+wait call instead, matching every other wrapper's
+      // second-and-later round with the coordinator.
+      thread_wake_scheduler_and_wait();
       libpthread_mutex_lock(mutex);
       return 0;
     }
