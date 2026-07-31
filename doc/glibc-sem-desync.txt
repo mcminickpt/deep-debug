@@ -1,0 +1,147 @@
+glibc sem_t "nwaiters" desync, and why child_side_sem is a raw futex instead
+=============================================================================
+
+What "glibc desync" means
+--------------------------
+glibc's NPTL sem_t packs two things into one 64-bit atomic word: the actual
+semaphore count, and `nwaiters` -- a count of how many threads are currently
+blocked inside sem_wait(). sem_post() uses `nwaiters` purely as an
+optimization: it increments the count, then checks `nwaiters`, and only
+makes the FUTEX_WAKE syscall if `nwaiters > 0`. If `nwaiters == 0`, it
+assumes nobody's waiting and skips the syscall entirely.
+
+"Desync" means `nwaiters` (glibc's userspace belief about who's waiting) no
+longer matches the kernel's actual futex wait queue for that address. When
+that happens, sem_post() can wrongly conclude "nobody is waiting" and
+silently skip the wake -- even though a real thread is genuinely parked in
+the kernel on that exact word. That is a lost wakeup, and the thread hangs
+forever.
+
+Does this happen only across checkpoint-restart, or anywhere?
+---------------------------------------------------------------
+Only in scenarios like McMini's, not in ordinary programs.
+
+In normal execution, `nwaiters` can never drift from reality, because the
+only code that ever touches it is sem_wait()/sem_post() themselves, via
+atomic read-modify-write on that same packed word -- it is a closed,
+self-consistent system. The only way to break it is for something *outside*
+the semaphore's own API to reset that memory (sem_destroy() + sem_init(), or
+an equivalent memset) while a thread is still validly blocked on it -- which
+POSIX explicitly documents as undefined behavior ("it is safe to destroy a
+semaphore only once no thread is blocked on it").
+
+Ordinary programs don't hit this because they only ever destroy a semaphore
+once they've confirmed nothing is using it. McMini's situation is different:
+DMTCP's checkpoint/restart transparently preserves a thread's real
+kernel-level "I'm blocked in this exact FUTEX_WAIT" state across the
+restart (that's just how checkpointing a blocked syscall works), while
+McMini's own code (mc_runner_mailbox_init()/mc_runner_mailbox_destroy())
+separately, explicitly reinitializes that same shared-memory semaphore for
+the new branch -- invisible to, and inconsistent with, a thread that (from
+the kernel's point of view) never actually left its old wait.
+
+CRIU's own documentation names this exact rule: everything sharing a
+futex/shared-memory region must be checkpointed and restored together as
+one atomic unit. McMini's architecture -- a permanent, never-checkpointed
+verifier sharing memory with a repeatedly-restarted target -- inherently
+breaks that rule.
+
+So: this is not a general glibc footgun waiting anywhere in a normal
+program; it is specific to externally reinitializing a semaphore's memory
+while a checkpoint/restart mechanism has silently kept a thread genuinely
+blocked on it underneath. Take away either half (no checkpoint/restart, or
+no external reinitialization) and it cannot occur.
+
+The fix
+--------
+Commit 1a4b3d9 ("Replace child_side_sem's glibc sem_t with a plain futex
+word") replaces `child_side_sem` -- the mailbox semaphore a DMTCP-restored
+target thread waits on, posted by the verifier -- with a bare futex word
+that has no separate userspace bookkeeping to desync in the first place.
+
+Files and functions:
+
+  include/mcmini/real_world/mailbox/runner_mailbox.h
+    - `child_side_sem` changed from `sem_t` to `uint32_t`.
+
+  src/common/runner_mailbox.c
+    - `mc_futex()`               -- thin wrapper around syscall(SYS_futex, ...).
+    - `mc_raw_sem_wait()`        -- replaces sem_wait() on child_side_sem: spins
+                                    on an atomic compare-and-swap against the
+                                    counter, blocking via FUTEX_WAIT only when
+                                    the counter is 0.
+    - `mc_raw_sem_post()`        -- replaces sem_post() on child_side_sem:
+                                    atomically increments the counter, then
+                                    calls FUTEX_WAKE *unconditionally* -- no
+                                    "is anyone really waiting" check, so there
+                                    is nothing to desync.
+    - `mc_wait_for_scheduler()`  -- now calls mc_raw_sem_wait().
+    - `mc_wake_thread()`         -- now calls mc_raw_sem_post().
+    - `mc_runner_mailbox_init()`/`mc_runner_mailbox_destroy()` -- initialize/
+      no-op-destroy the futex word directly instead of calling sem_init()/
+      sem_destroy() on it.
+
+`model_side_sem` (the verifier waits, the target posts) is untouched and
+remains a real sem_t: the verifier process is never checkpointed, so its
+side of the bookkeeping can never desync.
+
+Not yet fixed
+---------------
+Condition variables (pthread_cond_wait/pthread_cond_signal) have the same
+class of vulnerability via glibc's G1/G2 waiter-group bookkeeping, for the
+same reason (checkpoint/restart + externally-managed reinitialization). An
+analogous fix has not yet been applied there.
+
+Does this require pshared=1, or can it happen with pshared=0 too?
+---------------------------------------------------------------------
+`pshared` is the second parameter of sem_init() (`int sem_init(sem_t *sem,
+int pshared, unsigned int value)`): pshared=0 means the semaphore may only
+be used among threads of the single process that created it; pshared=1
+means it may be shared across process boundaries (typically by placing it
+in memory obtained via shm_open()/mmap(), as McMini does here).
+
+This bug requires pshared=1. It cannot happen with pshared=0, and the
+reason follows directly from the mechanism above: the desync needs an
+entity *outside the checkpointed unit* to reinitialize the semaphore's
+memory while a thread inside that unit is still genuinely blocked on it. In
+McMini's architecture that outside entity is the verifier (mcmini) -- a
+separate, permanent, never-checkpointed process -- while the target (with
+the blocked thread) gets checkpoint/restarted. DMTCP transparently
+preserves the target's kernel-level block across the restart, but the
+verifier's reinitialization of that shared memory has no way to know about,
+or wait for, that survival, because it is not part of the same checkpoint
+image at all.
+
+If pshared=0, the semaphore is only valid for use among threads of a
+single process. DMTCP checkpoints and restores that whole process --
+every thread, and all of the semaphore's own memory (nwaiters and value
+together) -- as one atomic, consistent snapshot. There is no outsider who
+could reinitialize the memory independently of the blocked thread's
+restore, because everything that touches it moves through the
+checkpoint/restart together.
+
+Two more reasons this is specifically a pshared=1 problem:
+
+  1. Using a pshared=0 semaphore across two processes is undefined
+     behavior under POSIX regardless of checkpointing -- Linux's NPTL
+     implementation uses FUTEX_PRIVATE_FLAG for private (pshared=0) futex
+     operations, keyed off the process's own memory descriptor, which
+     specifically assumes same-process access. "verifier process + target
+     process share a pshared=0 semaphore" is not a valid configuration to
+     begin with.
+  2. model_side_sem (still a real sem_t, pshared=1, in this same mailbox)
+     is the control case that proves the point: it is just as
+     cross-process-shared as child_side_sem was, but it is fine, because
+     the verifier's side of it is never checkpointed -- only the target
+     side (posting) is. The bug needs the *waiting* side to be the one
+     that gets checkpoint/restarted while the memory gets reinitialized
+     out from under it; that combination cannot arise for a purely
+     intra-process, pshared=0 semaphore.
+
+Separately: an ordinary program could still hit undefined behavior by
+calling sem_destroy() on any semaphore -- pshared=0 or 1 -- while a thread
+is genuinely blocked on it. That is always illegal per POSIX. But that is
+a plain application bug, not "the checkpoint/restart desync": the
+McMini-specific failure mode is that the reinitialization happens from a
+vantage point that literally cannot see the blocked thread at all, which
+is only possible across the process boundary that pshared=1 implies.
