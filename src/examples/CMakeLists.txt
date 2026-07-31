@@ -133,16 +133,19 @@ add_custom_command(TARGET exit-stress-noop-tsan POST_BUILD
 # TSan-instrumented variant of cv-producer-consumer, for testing McMini's
 # DMTCP-restart + TSan integration against condition variables (see
 # doc/glibc-cond-var-desync.txt). Same recipe as producer-consumer-tsan
-# above, plus -Wl,--wrap=pthread_cond_wait + pthread_cond_wait_wrap.c --
-# see that file's header comment for why it's needed.
+# above, plus -Wl,--wrap=pthread_cond_wait + pthread_cond_wait_wrap.c and
+# -Wl,--wrap=pthread_cond_signal + pthread_cond_signal_wrap.c -- see those
+# files' header comments for why each is needed.
 add_executable(cv-producer-consumer-tsan cv-producer-consumer.c
                                          ../lib/pthread_join_wrap.c
-                                         ../lib/pthread_cond_wait_wrap.c)
+                                         ../lib/pthread_cond_wait_wrap.c
+                                         ../lib/pthread_cond_signal_wrap.c)
 target_compile_options(cv-producer-consumer-tsan PUBLIC -fsanitize=thread)
 target_link_options(cv-producer-consumer-tsan PUBLIC
   -fsanitize=thread
   -Wl,--wrap=pthread_join
-  -Wl,--wrap=pthread_cond_wait)
+  -Wl,--wrap=pthread_cond_wait
+  -Wl,--wrap=pthread_cond_signal)
 target_link_libraries(cv-producer-consumer-tsan PUBLIC -pthread libmcmini)
 
 # See the producer-consumer-tsan POST_BUILD step above for why this is needed.
@@ -155,12 +158,14 @@ add_custom_command(TARGET cv-producer-consumer-tsan POST_BUILD
 # -- see producer-consumer-safe-tsan above for why.
 add_executable(cv-producer-consumer-safe-tsan cv-producer-consumer-safe.c
                                               ../lib/pthread_join_wrap.c
-                                              ../lib/pthread_cond_wait_wrap.c)
+                                              ../lib/pthread_cond_wait_wrap.c
+                                              ../lib/pthread_cond_signal_wrap.c)
 target_compile_options(cv-producer-consumer-safe-tsan PUBLIC -fsanitize=thread)
 target_link_options(cv-producer-consumer-safe-tsan PUBLIC
   -fsanitize=thread
   -Wl,--wrap=pthread_join
-  -Wl,--wrap=pthread_cond_wait)
+  -Wl,--wrap=pthread_cond_wait
+  -Wl,--wrap=pthread_cond_signal)
 target_link_libraries(cv-producer-consumer-safe-tsan PUBLIC -pthread libmcmini)
 
 add_custom_command(TARGET cv-producer-consumer-safe-tsan POST_BUILD
