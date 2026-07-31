@@ -1433,11 +1433,23 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       libpthread_mutex_lock(&rec_list_lock);
       rec_list *cond_record = find_object_record_mode(cond);
       if (cond_record == NULL) {
-        fprintf(stderr,
-                "Undefined behavior: attempting to signal an uninitialized"
-                "condition variable %p",
-                cond);
-        libc_abort();
+        // A real pthread_cond_init() call has the exact same TSan-
+        // interceptor-bypass problem pthread_cond_wait/signal do (never
+        // reaches mc_pthread_cond_init() under DMTCP), so cond_record can
+        // legitimately not exist yet here -- e.g. a producer that signals
+        // before any consumer has ever waited on this cond var. Mirror
+        // mc_pthread_cond_wait()'s own lazy-init instead of aborting: a
+        // signal with no one having waited yet is a well-defined no-op
+        // (matches condition_variable_signal::modify()'s own "signal with
+        // no waiters is a valid lost wakeup" semantics).
+        pthread_t this_thread = pthread_self();
+        rec_list *thrd_record = find_thread_record_mode(this_thread);
+        visible_object vo = {
+          .type = CONDITION_VARIABLE, .location = cond, .cond_state = { .status = CV_INITIALIZED,
+          .interacting_thread = thrd_record->vo.thrd_state.id,
+          .associated_mutex = NULL, .count = 0, .waiting_threads = create_thread_queue() }
+        };
+        cond_record = add_rec_entry_record_mode(&vo);
       }
       // Store pre-signal waiting count (only count CV_WAITING threads)
       int cv_waiting_count = 0;
@@ -1534,11 +1546,19 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
       libpthread_mutex_lock(&rec_list_lock);
       rec_list *cond_record = find_object_record_mode(cond);
       if (cond_record == NULL) {
-        fprintf(stderr,
-                "Undefined behavior: attempting to broadcast an uninitialized"
-                "condition variable %p",
-                cond);
-        libc_abort();
+        // See mc_pthread_cond_signal()'s identical lazy-init: a broadcast
+        // with no one having waited yet is a well-defined no-op, not
+        // undefined behavior -- cond_record can legitimately not exist yet
+        // if pthread_cond_init() hasn't reached the model (same TSan-
+        // interceptor-bypass problem wait/signal have).
+        pthread_t this_thread = pthread_self();
+        rec_list *thrd_record = find_thread_record_mode(this_thread);
+        visible_object vo = {
+          .type = CONDITION_VARIABLE, .location = cond, .cond_state = { .status = CV_INITIALIZED,
+          .interacting_thread = thrd_record->vo.thrd_state.id,
+          .associated_mutex = NULL, .count = 0, .waiting_threads = create_thread_queue() }
+        };
+        cond_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
       int rc = libpthread_cond_broadcast(cond);
