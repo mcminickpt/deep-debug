@@ -1,0 +1,141 @@
+glibc pthread_cond_t desync under checkpoint/restart, and how it was fixed
+=============================================================================
+
+This is the condition-variable counterpart to doc/glibc-sem-desync.txt (read
+that first for the general "glibc desync" mechanism -- packed nwaiters/G1/G2
+waiter-group bookkeeping going out of sync with the kernel's real futex wait
+state). This file covers the parts specific to pthread_cond_wait/signal/
+broadcast, including a point that isn't obvious by analogy with semaphores:
+application condition variables are normally single-process (pshared=0), so
+the "why does this need pshared=1" argument in glibc-sem-desync.txt does not
+directly apply here. The real mechanism is different, and narrower than a
+simple "lost wakeup."
+
+Why a normally single-process (pshared=0) CV can still be affected
+----------------------------------------------------------------------
+A target program's own pthread_cond_t is typically initialized with the
+default attribute -- PTHREAD_PROCESS_PRIVATE, pshared=0 -- since it is only
+ever used among that program's own threads. That is unlike child_side_sem,
+which had to be pshared=1 because it is shared between two genuinely
+different, concurrently-running OS processes (the verifier and the target).
+
+The relevant boundary for CVs is not "two concurrently-running processes";
+it is "two different incarnations of the same checkpointed memory". McMini's
+own architecture recreates the entire target process repeatedly: every
+explored DPOR branch is a brand-new OS process, produced by
+multithreaded_fork()/__clone(), all derived from the same original DMTCP
+checkpoint. A clone()-recreated thread in one of these new branch processes
+resumes exactly where it left off at checkpoint time -- including,
+potentially, being genuinely blocked at the kernel level inside
+pthread_cond_wait()'s real futex wait. If anything in that same new branch
+process were to touch the CV's real glibc state independently of that
+resurrected thread's still-live kernel wait, the same class of desync as
+the semaphore case could occur -- without pshared=1 ever being involved,
+because the "other party" here is not a second process but McMini's own
+restart-handling code running in that same, newly-created process.
+
+What tracing McMini's actual CV code found
+---------------------------------------------
+Unlike the child_side_sem case (confirmed via a direct FUTEX_WAKE(INT_MAX)
+probe), this vulnerability was found by reading mc_pthread_cond_wait(),
+mc_pthread_cond_signal(), mc_pthread_cond_broadcast(), mc_pthread_cond_init(),
+and mc_pthread_cond_destroy() in src/lib/wrappers.c end to end, across every
+libmcmini_mode. Two things stood out:
+
+1. mc_pthread_cond_wait() NEVER calls the real libpthread_cond_wait()/
+   libpthread_cond_timedwait() in any post-restart mode (DMTCP_RESTART_INTO_
+   BRANCH, DMTCP_RESTART_INTO_TEMPLATE, TARGET_BRANCH, TARGET_BRANCH_AFTER_
+   RESTART). In those modes, the wait is entirely simulated: the thread
+   posts a COND_ENQUEUE_TYPE and then a COND_WAIT_TYPE message via the
+   mailbox (thread_wake_scheduler_and_wait()/thread_handle_after_dmtcp_
+   restart(), which run on model_side_sem/child_side_sem -- the same
+   mailbox already hardened in doc/glibc-sem-desync.txt), unlocks/relocks the
+   real mutex around that handshake, and returns 0. This is true even in
+   classic (non-DMTCP) mode, not just under DMTCP -- it has nothing to do
+   with checkpoint/restart per se; it is simply how McMini simulates CV
+   waits for model checking in general.
+
+2. mc_pthread_cond_signal()/mc_pthread_cond_broadcast()/mc_pthread_cond_init()/
+   mc_pthread_cond_destroy() DID still call the real libpthread_cond_signal()/
+   broadcast()/init()/destroy() in those exact same post-restart modes, after
+   doing the same mailbox handshake. This was an asymmetry: the wait side had
+   already stopped depending on the real object's state, but the signal/
+   broadcast/init/destroy side kept touching it anyway.
+
+Why that asymmetry is dangerous
+-----------------------------------
+Since wait never blocks on the real CV once restart-related, unlike
+child_side_sem's straightforward lost-wakeup story, the risk here is not
+"the real signal quietly does nothing." It's the opposite and arguably
+worse: a clone()-resurrected thread can still be genuinely, kernel-level
+blocked inside a pre-restart real pthread_cond_timedwait() call (from
+RECORD mode, if the checkpoint happened to land mid-call). If a real
+signal/broadcast in a later branch reaches that resurrected thread, it
+wakes it for real -- letting it resume running real application code
+without ever going through the model checker's own scheduling. That breaks
+DPOR's core invariant that the verifier controls exactly one thread's next
+step at a time. A real, uncontrolled wakeup escaping the model checker is
+a more severe failure mode than a lost wakeup: instead of a hang, it is a
+thread running unsupervised.
+
+Note this is *not* about McMini reinitializing the application's own CV the
+way mc_runner_mailbox_init() reinitializes child_side_sem every branch:
+mc_pthread_cond_init() only touches the real object if the *application
+itself* calls pthread_cond_init() again post-restart (uncommon). The danger
+here is purely the wait/signal asymmetry above.
+
+The fix
+--------
+Removed the real libpthread_cond_signal()/libpthread_cond_broadcast()/
+libpthread_cond_init()/libpthread_cond_destroy() calls from all four
+post-restart cases (DMTCP_RESTART_INTO_BRANCH, DMTCP_RESTART_INTO_TEMPLATE,
+TARGET_BRANCH, TARGET_BRANCH_AFTER_RESTART) in src/lib/wrappers.c, replacing
+each with an unconditional `return 0;` after the existing mailbox handshake
+-- mirroring exactly what mc_pthread_cond_wait() already did in those same
+modes. Once wait never consults the real object's state, there is no
+correctness benefit to signal/broadcast/init/destroy touching it either;
+only risk.
+
+Functions changed (src/lib/wrappers.c), each in its
+DMTCP_RESTART_INTO_BRANCH/DMTCP_RESTART_INTO_TEMPLATE and
+TARGET_BRANCH/TARGET_BRANCH_AFTER_RESTART cases:
+
+  - mc_pthread_cond_init()      -- no longer calls libpthread_cond_init().
+  - mc_pthread_cond_signal()    -- no longer calls libpthread_cond_signal().
+  - mc_pthread_cond_broadcast() -- no longer calls libpthread_cond_broadcast().
+  - mc_pthread_cond_destroy()   -- no longer calls libpthread_cond_destroy().
+
+RECORD/PRE_CHECKPOINT mode is untouched: those calls still execute for
+real. That is safe and necessary, because RECORD mode is one continuous
+execution before any checkpoint has happened -- nothing external
+reinitializes the CV's memory mid-flight there, unlike the restart-time
+scenario above.
+
+Verification
+-------------
+- Rebuilt and confirmed classic (non-DMTCP) mode's cv-test example produces
+  byte-for-byte-equivalent output before and after the fix (modulo harmless
+  debug-log pid/interleaving differences) -- expected, since TARGET_BRANCH
+  mode's real signal/broadcast/init/destroy calls were already functionally
+  irrelevant there, exactly as wait's real call already was.
+- cv-hello-world's run time (and its eventual completion behavior within a
+  20s window) was unchanged before/after the fix, ruling out a new hang.
+- No DMTCP+TSan condition-variable target exists yet in this repo's own
+  CMake build to reproduce the resurrected-thread-woken-for-real scenario
+  end to end (unlike producer-consumer-tsan for the semaphore fix); this fix
+  is based on a full trace of the wrapper code's control flow across every
+  libmcmini_mode, not on reproducing the failure live.
+
+Related, separate observation (not part of this fix)
+----------------------------------------------------------
+mc_pthread_cond_wait()'s RECORD-mode retry loop declares
+`struct timespec wait_time = {.tv_sec = 2, .tv_nsec = 0};` and passes it
+directly to libpthread_cond_timedwait() as an absolute deadline. pthread_
+cond_timedwait()'s abstime is interpreted as an absolute point on the CV's
+associated clock (CLOCK_REALTIME by default) -- so this reads as "2 seconds
+past the epoch," not "2 seconds from now," meaning the call would return
+ETIMEDOUT almost immediately rather than genuinely blocking for up to 2
+seconds. This looks like a pre-existing issue independent of the desync
+fix above (mc_pthread_join_impl's analogous RECORD-mode retry loop uses the
+same `{2, 0}` pattern for pthread_timedjoin_np). Worth checking separately;
+out of scope here.
