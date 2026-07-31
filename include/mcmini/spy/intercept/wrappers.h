@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <stdbool.h>
 
 #include "mcmini/defines.h"
 #include "mcmini/lib/entry.h"
@@ -26,6 +27,13 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 int mc_sem_post(sem_t *);
 int mc_sem_wait(sem_t *);
 int mc_pthread_join(pthread_t, void**);
+// See mc_pthread_join_impl() in wrappers.c: like mc_pthread_join(), but
+// whenever a real join is warranted, defers the actual join call to the
+// caller (setting *deferred = true) instead of performing it via
+// libpthread_pthread_join(). For use only by __wrap_pthread_join() (see
+// pthread_join_wrap.c), which must be linked directly into the target
+// alongside `-Wl,--wrap=pthread_join`, so it can call __real_pthread_join().
+int mc_pthread_join_maybe_defer(pthread_t, void**, bool *deferred);
 int mc_sem_init(sem_t*, int, unsigned);
 int mc_sem_post(sem_t*);
 int mc_sem_wait(sem_t*);

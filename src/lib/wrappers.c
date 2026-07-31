@@ -21,10 +21,30 @@ typedef struct pthread_map {
     pthread_t thread;
     runner_id_t value;
     // Posted by whichever thread eventually calls pthread_join() on this
-    // one (mc_pthread_join()'s TARGET_BRANCH case), waited on by this
-    // thread itself before it may really terminate (mc_exit_thread_in_child()).
-    // See the two functions for the full rationale.
+    // one (mc_pthread_join()'s TARGET_BRANCH*/DMTCP_RESTART_INTO_BRANCH-ish
+    // cases), waited on by this thread itself before it may really
+    // terminate (mc_exit_thread_in_child()). See the two functions for the
+    // full rationale.
     sem_t exit_permission_sem;
+    // Posted by this thread right after exit_permission_sem, immediately
+    // before it actually finishes. mc_pthread_join() waits on this instead
+    // of performing a real join for threads a real join could never
+    // resolve for anyway (see registered_post_restart below). Posting it
+    // unconditionally is harmless on paths where nothing waits on it.
+    sem_t really_exited_sem;
+    // Whether this thread's own (one-time) registration happened while
+    // get_current_mode() was already TARGET_BRANCH_AFTER_RESTART -- i.e.
+    // whether it was created via a real pthread_create() call made after a
+    // restart, as opposed to being one of the threads DMTCP resurrected via
+    // clone() (which never re-registers: such a thread resumes mid-
+    // execution via setcontext(), so its only-ever registration is from the
+    // original, pre-restart RECORD-mode run). A clone()-recreated thread
+    // never went through TSan's own pthread_create() interceptor, so TSan
+    // has no Tid for it and a real pthread_join() on it can never resolve
+    // (confirmed against TSan's own source -- see TSAN-pthread-join.md).
+    // mc_pthread_join() uses this flag to decide whether a real join is
+    // even possible for a given target thread.
+    bool registered_post_restart;
     struct pthread_map *next;
 } pthread_map_t;
 
@@ -43,17 +63,22 @@ void insert_pthread_map(pthread_t t, runner_id_t v) {
     n->thread = t;
     n->value = v;
     libpthread_sem_init(&n->exit_permission_sem, 0, 0);
+    libpthread_sem_init(&n->really_exited_sem, 0, 0);
+    n->registered_post_restart = (get_current_mode() == TARGET_BRANCH_AFTER_RESTART);
     n->next = head;
     head = n;
     libpthread_mutex_unlock(&pthread_map_lock);
 }
 
-runner_id_t search_pthread_map(pthread_t t) {
+// Returns the given thread's own pthread_map_t entry, or NULL if the thread
+// is not (yet) registered. The returned pointer stays valid to use after
+// unlocking: entries are only ever appended, never removed or reallocated.
+static pthread_map_t *find_pthread_map_entry(pthread_t t) {
     libpthread_mutex_lock(&pthread_map_lock);
-    runner_id_t result = RID_INVALID;
+    pthread_map_t *result = NULL;
     for (pthread_map_t *cur = head; cur != NULL; cur = cur->next) {
         if (pthread_equal(cur->thread, t)) {
-            result = cur->value;
+            result = cur;
             break;
         }
     }
@@ -61,19 +86,23 @@ runner_id_t search_pthread_map(pthread_t t) {
     return result;
 }
 
+runner_id_t search_pthread_map(pthread_t t) {
+    pthread_map_t *entry = find_pthread_map_entry(t);
+    return entry == NULL ? RID_INVALID : entry->value;
+}
+
 // Returns the given thread's own exit_permission_sem (see pthread_map_t),
 // or NULL if the thread is not (yet) registered.
 sem_t *find_exit_permission_sem(pthread_t t) {
-    libpthread_mutex_lock(&pthread_map_lock);
-    sem_t *result = NULL;
-    for (pthread_map_t *cur = head; cur != NULL; cur = cur->next) {
-        if (pthread_equal(cur->thread, t)) {
-            result = &cur->exit_permission_sem;
-            break;
-        }
-    }
-    libpthread_mutex_unlock(&pthread_map_lock);
-    return result;
+    pthread_map_t *entry = find_pthread_map_entry(t);
+    return entry == NULL ? NULL : &entry->exit_permission_sem;
+}
+
+// Returns the given thread's own really_exited_sem (see pthread_map_t), or
+// NULL if the thread is not (yet) registered.
+sem_t *find_really_exited_sem(pthread_t t) {
+    pthread_map_t *entry = find_pthread_map_entry(t);
+    return entry == NULL ? NULL : &entry->really_exited_sem;
 }
 
 
@@ -391,14 +420,21 @@ void mc_exit_thread_in_child(void) {
   thread_awake_scheduler_for_thread_finish_transition();
 
   // Wait for whichever thread eventually calls pthread_join() on this one
-  // (see mc_pthread_join()'s TARGET_BRANCH case) to grant permission before
-  // this thread is allowed to really terminate. This keeps this thread's
-  // pthread_t/tid valid for exactly as long as a real, unjoined POSIX
-  // thread's would be -- no longer -- rather than parking it forever
-  // regardless of whether anyone ever joins it.
+  // (see mc_pthread_join()'s TARGET_BRANCH*/DMTCP_RESTART_INTO_BRANCH-ish
+  // cases) to grant permission before this thread is allowed to really
+  // terminate. This keeps this thread's pthread_t/tid valid for exactly as
+  // long as a real, unjoined POSIX thread's would be -- no longer --
+  // rather than parking it forever regardless of whether anyone ever
+  // joins it.
   sem_t *exit_permission = find_exit_permission_sem(pthread_self());
   assert(exit_permission != NULL);
   libpthread_sem_wait(exit_permission);
+
+  // Signal genuine completion, in case the joiner can't use a real join
+  // (see mc_pthread_join()'s TARGET_BRANCH_AFTER_RESTART case).
+  sem_t *really_exited = find_really_exited_sem(pthread_self());
+  assert(really_exited != NULL);
+  libpthread_sem_post(really_exited);
 }
 
 void mc_exit_main_thread_in_child(void) {
@@ -875,7 +911,29 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   }
 }
 
-int mc_pthread_join(pthread_t t, void **rv) {
+// Shared implementation for mc_pthread_join() and mc_pthread_join_maybe_defer().
+//
+// If defer_real_join is false, behaves exactly as a normal join wrapper:
+// whenever a real join is warranted, it performs it directly (via
+// libpthread_pthread_join(), which bypasses TSan's own interceptor) and
+// *deferred is set to false.
+//
+// If defer_real_join is true, then whenever a real join is warranted, this
+// function does everything BUT the actual join call -- model bookkeeping,
+// granting exit permission -- and sets *deferred to true, returning a
+// value the caller must ignore. The caller (see __wrap_pthread_join(), in
+// pthread_join_wrap.c, linked directly into the target alongside
+// `-Wl,--wrap=pthread_join`) must then call __real_pthread_join() itself
+// and return its result. This exists because __real_pthread_join is only
+// a valid symbol within the target's own -Wl,--wrap=pthread_join link;
+// libmcmini.so (a separate, already-built shared library) cannot call it
+// directly. Doing the real join this way -- through TSan's own
+// interceptor, via __real_pthread_join, rather than bypassing it via
+// libpthread_pthread_join() -- lets TSan establish its own happens-before
+// edge for this join, instead of never seeing it at all.
+static int mc_pthread_join_impl(pthread_t t, void **rv, bool defer_real_join,
+                                bool *deferred) {
+  *deferred = false;
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT: {
       // This case implies that DMTCP attempted to join
@@ -964,8 +1022,10 @@ int mc_pthread_join(pthread_t t, void **rv) {
       thread_handle_after_dmtcp_restart();
       return 0;
     }
-    case TARGET_BRANCH:
-    case TARGET_BRANCH_AFTER_RESTART: {
+    case TARGET_BRANCH: {
+      // Never restarted: the target can only be a thread created via a
+      // real pthread_create(), so it always has a valid TSan Tid and a
+      // real join always works.
       runner_id_t rid = search_pthread_map(t);
       memcpy_v(thread_get_mailbox()->cnts, &rid, sizeof(runner_id_t));
       thread_get_mailbox()->type = THREAD_JOIN_TYPE;
@@ -979,13 +1039,57 @@ int mc_pthread_join(pthread_t t, void **rv) {
       sem_t *exit_permission = find_exit_permission_sem(t);
       assert(exit_permission != NULL);
       libpthread_sem_post(exit_permission);
+      if (defer_real_join) {
+        *deferred = true;
+        return 0;
+      }
       return libpthread_pthread_join(t, rv);
+    }
+    case TARGET_BRANCH_AFTER_RESTART: {
+      runner_id_t rid = search_pthread_map(t);
+      memcpy_v(thread_get_mailbox()->cnts, &rid, sizeof(runner_id_t));
+      thread_get_mailbox()->type = THREAD_JOIN_TYPE;
+      thread_wake_scheduler_and_wait();
+
+      // Grant the target thread permission to really terminate now that
+      // it's been joined (see mc_exit_thread_in_child()).
+      sem_t *exit_permission = find_exit_permission_sem(t);
+      assert(exit_permission != NULL);
+      libpthread_sem_post(exit_permission);
+
+      pthread_map_t *target = find_pthread_map_entry(t);
+      assert(target != NULL);
+      if (target->registered_post_restart) {
+        // Created fresh after the restart via a real pthread_create():
+        // has a valid TSan Tid, so a real join works normally.
+        if (defer_real_join) {
+          *deferred = true;
+          return 0;
+        }
+        return libpthread_pthread_join(t, rv);
+      }
+      // This thread predates the restart, so DMTCP resurrected it via
+      // clone(), bypassing TSan's own pthread_create() interceptor
+      // entirely. TSan has no Tid for it, so a real pthread_join() on it
+      // can never resolve (see TSAN-pthread-join.md). Wait for its own
+      // signal of genuine completion instead of joining it for real.
+      libpthread_sem_wait(&target->really_exited_sem);
+      return 0;
     }
     default: {
       libc_abort();
     }
   }
 
+}
+
+int mc_pthread_join(pthread_t t, void **rv) {
+  bool deferred;
+  return mc_pthread_join_impl(t, rv, false, &deferred);
+}
+
+int mc_pthread_join_maybe_defer(pthread_t t, void **rv, bool *deferred) {
+  return mc_pthread_join_impl(t, rv, true, deferred);
 }
 
 unsigned mc_sleep(unsigned duration) {
