@@ -129,3 +129,19 @@ target_link_libraries(mcmini
 
 add_subdirectory(src/examples)
 add_subdirectory(test)
+
+# `make check-tsan` builds and runs the TSan example targets that exercise
+# McMini's DMTCP+TSan integration through a checkpoint/restart cycle (see
+# script/check-tsan.sh). Needs dmtcp_launch/dmtcp_restart on PATH, or a local
+# DMTCP build's bin/ dir passed as DMTCP_BIN_DIR (defaults to dmtcp.git/bin
+# alongside this CMakeLists.txt, if present).
+if(NOT DEFINED DMTCP_BIN_DIR AND EXISTS "${CMAKE_SOURCE_DIR}/dmtcp.git/bin")
+  set(DMTCP_BIN_DIR "${CMAKE_SOURCE_DIR}/dmtcp.git/bin")
+endif()
+
+add_custom_target(check-tsan
+  COMMAND ${CMAKE_SOURCE_DIR}/script/check-tsan.sh
+          ${CMAKE_BINARY_DIR} ${DMTCP_BIN_DIR}
+  DEPENDS mcmini libmcmini cv-producer-consumer-multi-tsan
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  USES_TERMINAL)
