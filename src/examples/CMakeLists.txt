@@ -172,3 +172,23 @@ add_custom_command(TARGET cv-producer-consumer-safe-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:cv-producer-consumer-safe-tsan>
           ${CMAKE_BINARY_DIR}/cv-producer-consumer-safe-tsan)
+
+# Same as cv-producer-consumer-safe-tsan, but with multiple producers and
+# multiple consumers (see cv-producer-consumer-multi.c for why).
+add_executable(cv-producer-consumer-multi-tsan
+  cv-producer-consumer-multi.c
+  ../lib/pthread_join_wrap.c
+  ../lib/pthread_cond_wait_wrap.c
+  ../lib/pthread_cond_signal_wrap.c)
+target_compile_options(cv-producer-consumer-multi-tsan PUBLIC -fsanitize=thread)
+target_link_options(cv-producer-consumer-multi-tsan PUBLIC
+  -fsanitize=thread
+  -Wl,--wrap=pthread_join
+  -Wl,--wrap=pthread_cond_wait
+  -Wl,--wrap=pthread_cond_signal)
+target_link_libraries(cv-producer-consumer-multi-tsan PUBLIC -pthread libmcmini)
+
+add_custom_command(TARGET cv-producer-consumer-multi-tsan POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+          $<TARGET_FILE:cv-producer-consumer-multi-tsan>
+          ${CMAKE_BINARY_DIR}/cv-producer-consumer-multi-tsan)
