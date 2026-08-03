@@ -27,6 +27,11 @@
  * the coordinator to handle aliasing etc. by using the trace as a total
  * ordering on object-creation events. Until we run into this issue, we leave it
  * for future development.
+ *
+ * @note this correspondence covers visible _objects_ only. Runners (threads)
+ * are identified by the `runner_id_t` that `libmcmini.so` assigns them, not by
+ * the address of their `pthread_t` descriptor, which glibc recycles. See
+ * `observe_runner()`.
  */
 class model_to_system_map final {
  private:
@@ -43,13 +48,8 @@ class model_to_system_map final {
 
   model::state::objid_t get_model_of_object(
       real_world::remote_address<void>) const;
-  model::state::runner_id_t get_model_of_runner(
-      real_world::remote_address<void>) const;
   bool contains(real_world::remote_address<void> addr) const {
     return get_model_of_object(addr) != model::invalid_objid;
-  }
-  bool contains_runner(real_world::remote_address<void> addr) const {
-    return get_model_of_runner(addr) != model::invalid_rid;
   }
 
   using runner_generation_function =
@@ -66,16 +66,27 @@ class model_to_system_map final {
   model::state::objid_t observe_object(real_world::remote_address<void>,
                                        const model::visible_object_state *);
 
-  // TODO: Does it make sense to be able to add a runner without a transition
-  // and then later (retroactively) give it a transition (in _this_ interface
-  // that is)
-  model::state::runner_id_t observe_runner(real_world::remote_address<void>,
-                                           const model::runner_state *);
+  /**
+   * @brief Record the presence of a new runner (thread) which `libmcmini.so`
+   * has assigned the id `id` in the target process.
+   *
+   * Unlike visible objects, runners are _not_ identified by a remote address.
+   * A `pthread_t` is the address of a thread descriptor which glibc recycles
+   * once a thread is joined, so the same address routinely denotes different
+   * threads over the lifetime of the target. Instead, `libmcmini.so` assigns
+   * each thread a `runner_id_t` from a monotonic counter and reports that id
+   * directly; the same id also indexes the thread's mailbox in shared memory.
+   *
+   * The model allocates runner ids the same way (in order of discovery), so
+   * the id the model assigns must agree with the one the target reports.
+   *
+   * @throws std::runtime_error if the model assigns an id other than `id`,
+   * which means the model and the target have disagreed about the set of
+   * live threads.
+   */
+  void observe_runner(model::state::runner_id_t id,
+                      const model::runner_state *);
+  void observe_runner(model::state::runner_id_t id, const model::runner_state *,
+                      runner_generation_function f);
   void observe_runner_transition(const model::transition *);
-  model::state::runner_id_t observe_runner(real_world::remote_address<void>,
-                                           const model::runner_state *,
-                                           const model::transition *);
-  model::state::runner_id_t observe_runner(real_world::remote_address<void>,
-                                           const model::runner_state *,
-                                           runner_generation_function f);
 };

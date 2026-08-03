@@ -34,17 +34,21 @@ void insert_pthread_map(pthread_t t, runner_id_t v) {
     pthread_rwlock_unlock(&pthread_map_lock);
 }
 
+// NOTE: `insert_pthread_map()` prepends, so the first match is the most
+// recently created thread holding this descriptor. That is the only thread a
+// caller may legally join: glibc recycles a `pthread_t` once its thread has
+// been joined, at which point POSIX says the old handle is no longer valid.
 runner_id_t search_pthread_map(pthread_t t) {
-  pthread_rwlock_rdlock(&pthread_map_lock);
-    pthread_map_t *cur = head;
-    while (cur) {
+    runner_id_t value = RID_INVALID;
+    pthread_rwlock_rdlock(&pthread_map_lock);
+    for (pthread_map_t *cur = head; cur != NULL; cur = cur->next) {
         if (pthread_equal(cur->thread, t)) {
-            return cur->value;
+            value = cur->value;
+            break;
         }
-        cur = cur->next;
     }
     pthread_rwlock_unlock(&pthread_map_lock);
-    return RID_INVALID;
+    return value;
 }
 
 
@@ -453,12 +457,18 @@ MCMINI_NO_RETURN void mc_transparent_abort(void) {
 struct mc_thread_routine_arg {
   void *arg;
   thread_routine routine;
+
+  // The id `libmcmini.so` assigned the child. The child publishes it here
+  // before posting `mc_pthread_create_binary_sem`, so it is readable by the
+  // creator as soon as `sem_wait()` returns.
+  runner_id_t child_rid;
   sem_t mc_pthread_create_binary_sem;
 };
 
 void *mc_thread_routine_wrapper(void *arg) {
   runner_id_t rid = mc_register_this_thread();
   struct mc_thread_routine_arg *unwrapped_arg = arg;
+  unwrapped_arg->child_rid = rid;
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -619,6 +629,7 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
           malloc(sizeof(struct mc_thread_routine_arg));
       wrapped_arg->arg = arg;
       wrapped_arg->routine = routine;
+      wrapped_arg->child_rid = RID_INVALID;
       libpthread_sem_init(&wrapped_arg->mc_pthread_create_binary_sem, 0, 0);
       int rc = libdmtcp_pthread_create(
           thread, attr, &dmtcp_create_checkpoint_thread_wrapper, wrapped_arg);
@@ -645,6 +656,7 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
           malloc(sizeof(struct mc_thread_routine_arg));
       libmcmini_controlled_thread_arg->arg = arg;
       libmcmini_controlled_thread_arg->routine = routine;
+      libmcmini_controlled_thread_arg->child_rid = RID_INVALID;
       // TODO: Handle the errors that can occur when
       // pthread_create is called. They are unlikely to
       // occur in practice, but should be handled
@@ -669,6 +681,7 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
           malloc(sizeof(struct mc_thread_routine_arg));
       libmcmini_controlled_thread_arg->arg = arg;
       libmcmini_controlled_thread_arg->routine = routine;
+      libmcmini_controlled_thread_arg->child_rid = RID_INVALID;
       libpthread_sem_init(
           &libmcmini_controlled_thread_arg->mc_pthread_create_binary_sem, 0,
           0);
@@ -690,7 +703,18 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       libpthread_sem_wait(
           &libmcmini_controlled_thread_arg->mc_pthread_create_binary_sem);
 
-      memcpy_v(thread_get_mailbox()->cnts, thread, sizeof(pthread_t));
+      // Safe to read: the child is parked in
+      // `thread_await_scheduler()` and cannot reach the `free()` at the end of
+      // `mc_thread_routine_wrapper()` until the scheduler runs it, which it
+      // will not do before processing the THREAD_CREATE we are about to send.
+      const runner_id_t child_rid = libmcmini_controlled_thread_arg->child_rid;
+      assert(child_rid != RID_INVALID);
+
+      // Report the id `libmcmini.so` assigned the child rather than its
+      // `pthread_t`: glibc recycles thread descriptors, so the same
+      // `pthread_t` denotes different threads over the run and would make the
+      // model bind a new thread to a dead thread's runner.
+      memcpy_v(thread_get_mailbox()->cnts, &child_rid, sizeof(runner_id_t));
       thread_get_mailbox()->type = THREAD_CREATE_TYPE;
       thread_wake_scheduler_and_wait();
       return rv;
