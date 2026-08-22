@@ -8,14 +8,12 @@ using namespace objects;
 transition* thread_create_callback(runner_id_t p,
                                    const volatile runner_mailbox& rmb,
                                    model_to_system_map& m) {
-  pthread_t new_thread;
-  memcpy_v(&new_thread, static_cast<const volatile void*>(&rmb.cnts),
-           sizeof(pthread_t));
-  if (!m.contains_runner((void*)new_thread))
-    m.observe_runner(
-        (void*)new_thread, new thread(thread::embryo),
-        [](runner_id_t id) { return new transitions::thread_start(id); });
-  const runner_id_t new_thread_id = m.get_model_of_runner((void*)new_thread);
+  runner_id_t new_thread_id;
+  memcpy_v(&new_thread_id, static_cast<const volatile void*>(&rmb.cnts),
+           sizeof(runner_id_t));
+  m.observe_runner(
+      new_thread_id, new thread(thread::embryo),
+      [](runner_id_t id) { return new transitions::thread_start(id); });
   return new transitions::thread_create(p, new_thread_id);
 }
 

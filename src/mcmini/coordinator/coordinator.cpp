@@ -102,17 +102,6 @@ void coordinator::return_to_depth(uint32_t n) {
       << "\n\n**************** AFTER RESTORATION *********************";
 }
 
-model::state::runner_id_t model_to_system_map::get_model_of_runner(
-    remote_address<void> handle) const {
-  model::state::objid_t objid = get_model_of_object(handle);
-  if (objid != model::invalid_objid) {
-    return _coordinator.get_current_program_model()
-        .get_state_sequence()
-        .get_runner_id_for_obj(objid);
-  }
-  return model::invalid_rid;
-}
-
 model::state::objid_t model_to_system_map::get_model_of_object(
     remote_address<void> handle) const {
   if (_coordinator.system_address_mapping.count(handle) > 0) {
@@ -136,50 +125,38 @@ model::state::objid_t model_to_system_map::observe_object(
   return new_objid;
 }
 
-model::state::runner_id_t model_to_system_map::observe_runner(
-    real_world::remote_address<void> rp_vobj_handle,
-    const model::runner_state *vobs, const model::transition *t) {
-  return observe_runner(std::move(rp_vobj_handle), vobs,
-                        [t](runner_id_t id) { return t; });
+namespace {
+
+void assert_runner_ids_agree(model::state::runner_id_t reported_by_target,
+                             model::state::runner_id_t assigned_by_model) {
+  if (reported_by_target == assigned_by_model) return;
+  std::stringstream ss;
+  ss << "The target reported a new thread with id " << reported_by_target
+     << ", but the model assigned it the id " << assigned_by_model
+     << ". The model and the target disagree about which threads are live; "
+        "the id also indexes the thread's mailbox, so the coordinator can no "
+        "longer address the threads it is scheduling.";
+  throw std::runtime_error(ss.str());
 }
 
-model::state::runner_id_t model_to_system_map::observe_runner(
-    real_world::remote_address<void> rp_vobj_handle,
-    const model::runner_state *vobs, runner_generation_function f) {
-  if (contains(rp_vobj_handle)) {
-    throw std::runtime_error(
-        "Attempting to rebind a remote address to an object that already "
-        "exists in the model. Did you check that the object doesn't already "
-        "exist?");
-  }
-  model::state::runner_id_t const new_runner_id =
-      _coordinator.current_program_model.discover_runner(vobs, std::move(f));
-  model::state::objid_t const new_objid =
-      _coordinator.get_current_program_model()
-          .get_state_sequence()
-          .get_objid_for_runner(new_runner_id);
-  _coordinator.system_address_mapping.insert({rp_vobj_handle, new_objid});
-  return new_runner_id;
+}  // namespace
+
+void model_to_system_map::observe_runner(model::state::runner_id_t id,
+                                         const model::runner_state *vobs,
+                                         runner_generation_function f) {
+  assert_runner_ids_agree(
+      id, _coordinator.current_program_model.discover_runner(vobs, std::move(f)));
+}
+
+void model_to_system_map::observe_runner(model::state::runner_id_t id,
+                                         const model::runner_state *rs) {
+  assert_runner_ids_agree(
+      id,
+      _coordinator.current_program_model.get_current_state().add_runner(rs));
 }
 
 void model_to_system_map::observe_runner_transition(
     const model::transition *t) {
   _coordinator.current_program_model.get_pending_transitions().set_transition(
       t);
-}
-
-model::state::runner_id_t model_to_system_map::observe_runner(
-    real_world::remote_address<void> rp_vobj_handle,
-    const model::runner_state *rs) {
-  // TODO: Remove code duplication here. Also there's a better way to do all of
-  // this I think (instead of e.g. needing to add similar methods onto
-  // `model::program`)
-  model::state::runner_id_t const new_runner_id =
-      _coordinator.current_program_model.get_current_state().add_runner(rs);
-  model::state::objid_t const new_objid =
-      _coordinator.get_current_program_model()
-          .get_state_sequence()
-          .get_objid_for_runner(new_runner_id);
-  _coordinator.system_address_mapping.insert({rp_vobj_handle, new_objid});
-  return new_runner_id;
 }
